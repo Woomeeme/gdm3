@@ -1,7 +1,7 @@
 project('gdm', 'c',
-  version: '41.0',
+  version: '47.0',
   license: 'GPL2+',
-  meson_version: '>= 0.50',
+  meson_version: '>= 0.57',
 )
 
 # Modules
@@ -12,8 +12,12 @@ i18n = import('i18n')
 # Compiler
 cc = meson.get_compiler('c')
 
+# Use GNU extensions if available
+add_project_arguments('-D_GNU_SOURCE', language: 'c')
+
 # Options
 gdm_prefix = get_option('prefix')
+gdm_datadir = get_option('datadir') / meson.project_name()
 
 gdmconfdir = (get_option('sysconfsubdir') == '')? gdm_prefix / get_option('sysconfdir') : gdm_prefix / get_option('sysconfdir') / get_option('sysconfsubdir')
 dmconfdir = (get_option('dmconfdir') != '')? get_option('dmconfdir') : gdm_prefix / get_option('sysconfdir') / 'dm'
@@ -22,7 +26,7 @@ at_spi_registryd_dir = (get_option('at-spi-registryd-dir') != '')? get_option('a
 lang_config_file = (get_option('lang-file') != '')? get_option('lang-file') : gdm_prefix / get_option('sysconfdir') / 'locale.conf'
 pam_mod_dir = (get_option('pam-mod-dir') != '')? get_option('pam-mod-dir') : gdm_prefix / get_option('libdir') / 'security'
 dbus_sys_dir = (get_option('dbus-sys') != '')? get_option('dbus-sys') : get_option('sysconfdir') / 'dbus-1' / 'system.d'
-gdm_defaults_conf = (get_option('defaults-conf') != '')? get_option('defaults-conf') : gdm_prefix / get_option('datadir') / 'gdm' / 'defaults.conf'
+gdm_defaults_conf = (get_option('defaults-conf') != '')? get_option('defaults-conf') : gdm_prefix / gdm_datadir / 'defaults.conf'
 gdm_custom_conf = (get_option('custom-conf') != '')? get_option('custom-conf') : gdmconfdir / 'custom.conf'
 gnome_settings_daemon_dir = (get_option('gnome-settings-daemon-dir') != '')? get_option('gnome-settings-daemon-dir') : gdm_prefix / get_option('libexecdir')
 gdm_run_dir = (get_option('run-dir') != '')? get_option('run-dir') : gdm_prefix / get_option('localstatedir') / 'run' / 'gdm'
@@ -32,30 +36,44 @@ ran_once_marker_dir = (get_option('ran-once-marker-dir') != '')? get_option('ran
 working_dir = (get_option('working-dir') != '')? get_option('working-dir') : gdm_prefix / get_option('localstatedir') / 'lib' / 'gdm'
 gdm_xauth_dir = (get_option('xauth-dir') != '')? get_option('xauth-dir') : gdm_run_dir
 gdm_screenshot_dir = (get_option('screenshot-dir') != '')? get_option('screenshot-dir') : gdm_run_dir / 'greeter'
-
+gdm_private_dbus_dir = (get_option('private-dbus-dir') != '')? get_option('private-dbus-dir') : gdm_run_dir / 'dbus'
+pam_prefix = (get_option('pam-prefix') != '')? get_option('pam-prefix') : get_option('sysconfdir')
+pam_profiles_dir = pam_prefix / 'pam.d'
+have_x11_support = get_option('x11-support')
 # Common variables
 config_h_dir = include_directories('.')
 
+if not get_option('wayland-support') and not have_x11_support
+  error('GDM requires either Wayland or X11 support')
+endif
+
 # Dependencies
 udev_dep = dependency('udev')
+gudev_dep = dependency('gudev-1.0', version: '>= 232')
 
-glib_min_version = '2.56.0'
+# PAM
+libpam_dep = cc.find_library('pam')
+pam_extensions_supported = cc.has_header_symbol(
+  'security/pam_appl.h', 'PAM_BINARY_PROMPT',
+  dependencies: libpam_dep)
+
+glib_min_version = '2.68.0'
 
 glib_dep = dependency('glib-2.0', version: '>=' + glib_min_version)
 gobject_dep = dependency('gobject-2.0', version: '>=' + glib_min_version)
 gio_dep = dependency('gio-2.0', version: '>=' + glib_min_version)
 gio_unix_dep = dependency('gio-unix-2.0', version: '>=' + glib_min_version)
-gtk_dep = dependency('gtk+-3.0', version: '>= 2.91.1')
-libcanberra_gtk_dep = dependency('libcanberra-gtk3', version: '>= 0.4')
+dconf_dep = dependency('dconf', required: false)
+json_glib = dependency('json-glib-1.0', version: '>= 1.2.0',
+  required: pam_extensions_supported)
 accountsservice_dep = dependency('accountsservice', version: '>= 0.6.35')
-xcb_dep = dependency('xcb')
 keyutils_dep = dependency('libkeyutils', required: false)
 libselinux_dep = dependency('libselinux', required: get_option('selinux'))
 
 # udev
 if udev_dir == ''
   if udev_dep.found()
-    udev_prefix = udev_dep.get_pkgconfig_variable('udevdir')
+    udev_prefix = udev_dep.get_variable(pkgconfig: 'udevdir')
   else
     udev_prefix = gdm_prefix / 'lib' / 'udev'
   endif
@@ -63,50 +81,66 @@ if udev_dir == ''
 endif
 
 # X11
-x_deps = declare_dependency(
-  dependencies: [
-    dependency('x11'),
-    dependency('xau'),
-  ],
-)
-find_x_server_script = find_program('build-aux/find-x-server.sh', native: true)
-find_x_server_out = run_command(find_x_server_script).stdout().strip()
-if find_x_server_out != ''
-  x_bin = find_x_server_out
-  x_bin_path_split = x_bin.split('/')
-  i = 0
-  x_path = '/'
-  foreach dir : x_bin_path_split
-    if i < x_bin_path_split.length() - 1
-      x_path = x_path / dir
-    endif
-    i = i + 1
-  endforeach
+# defaults
+x_path = '/usr/bin/X11:/usr/X11R6/bin:/opt/X11R6/bin'
+x_bin = '/usr/bin/X'
+if have_x11_support
+  xcb_dep = dependency('xcb')
+  x_deps = declare_dependency(
+    dependencies: [
+      dependency('x11'),
+      dependency('xau'),
+    ],
+  )
+  # Xserver 1.17 & later default to -nolisten and require -listen for remote access
+  xserver_deps = dependency('xorg-server', version : '>=1.17', required : false)
+  xserver_has_listen = xserver_deps.found()
+  find_x_server_script = find_program('build-aux/find-x-server.sh', native: true)
+  find_x_server_out = run_command(find_x_server_script).stdout().strip()
+  if find_x_server_out != ''
+    x_bin = find_x_server_out
+    x_bin_path_split = x_bin.split('/')
+    i = 0
+    x_path = '/'
+    foreach dir : x_bin_path_split
+      if i < x_bin_path_split.length() - 1
+        x_path = x_path / dir
+      endif
+      i = i + 1
+    endforeach
+  endif
+
+  xdmcp_dep = cc.find_library('Xdmcp', required: get_option('xdmcp'))
+  have_xdmcp = xdmcp_dep.found()
+  if have_xdmcp
+    gtk_dep = dependency('gtk+-3.0', version: '>= 2.91.1')
+  endif
+  if have_xdmcp and get_option('tcp-wrappers')
+    libwrap_dep = cc.find_library('wrap')
+  endif
 else
-  # what to do, what to do, this is wrong, but this just sets the
-  # defaults, perhaps this user is cross compiling or some such
-  x_path = '/usr/bin/X11:/usr/X11R6/bin:/opt/X11R6/bin'
-  x_bin = '/usr/bin/X'
-endif
-xdmcp_dep = cc.find_library('Xdmcp', required: get_option('xdmcp'))
-if xdmcp_dep.found() and get_option('tcp-wrappers')
-  libwrap_dep = cc.find_library('wrap')
+  xserver_has_listen = false
+  have_xdmcp = false
 endif
 # systemd
-systemd_dep = dependency('systemd')
-libsystemd_dep = dependency('libsystemd')
-if meson.version().version_compare('>= 0.53')
+logind_provider = get_option('logind-provider')
+systemd_dep = dependency('systemd', required: false)
+if logind_provider == 'systemd'
+  libsystemd_dep = dependency('libsystemd')
+  logind_dep = libsystemd_dep
   systemd_multiseat_x = find_program('systemd-multi-seat-x',
     required: false,
     dirs: [
-      systemd_dep.get_pkgconfig_variable('systemdutildir'),
+      systemd_dep.get_variable(pkgconfig: 'systemdutildir'),
       '/lib/systemd',
       '/usr/lib/systemd',
     ])
+  systemd_x_server = systemd_multiseat_x.found()? systemd_multiseat_x.path() : '/lib/systemd/systemd-multi-seat-x'
 else
-  systemd_multiseat_x = find_program('systemd-multi-seat-x', required: false)
+  elogind_dep = dependency('libelogind')
+  logind_dep = elogind_dep
+  systemd_x_server = 'disabled'
 endif
-systemd_x_server = systemd_multiseat_x.found()? systemd_multiseat_x.path() : '/lib/systemd/systemd-multi-seat-x'
 # Plymouth
 plymouth_dep = dependency('ply-boot-client', required: get_option('plymouth'))
 # Check for Solaris auditing API (ADT)
@@ -158,33 +192,41 @@ int main(int argc, char **argv) {
 }
 ''')
 
-# PAM
-libpam_dep = cc.find_library('pam')
-pam_extensions_supported = cc.has_header_symbol('security/pam_appl.h', 'PAM_BINARY_PROMPT')
+distro_autodetect_map = {
+  '/etc/redhat-release': 'redhat',
+  '/etc/fedora-release': 'redhat',
+  '/etc/exherbo-release': 'exherbo',
+  '/etc/arch-release': 'arch',
+  '/etc/lfs-release': 'lfs',
+}
 
-default_pam_config = get_option('default-pam-config')
-# If requested, try autodetecting from release files (see NetworkManager source)
-if default_pam_config == 'autodetect'
-  pam_autodetect_map = {
-    '/etc/redhat-release': 'redhat',
-    '/etc/fedora-release': 'redhat',
-    '/etc/exherbo-release': 'exherbo',
-    '/etc/arch-release': 'arch',
-    '/etc/lfs-release': 'lfs',
-  }
-
-  foreach _file, _pam_conf : pam_autodetect_map
-    pam_file_check = run_command('test', '-f', _file)
-    if pam_file_check.returncode() == 0
-      default_pam_config = _pam_conf
+distro = get_option('distro')
+if distro == 'none'
+  foreach _file, _pam_conf : distro_autodetect_map
+    distro_check = run_command('test', '-f', _file)
+    if distro_check.returncode() == 0
+      distro = _pam_conf
     endif
   endforeach
-
-  # If still not detected, default to none
-  if default_pam_config == 'autodetect'
-    default_pam_config = 'none'
-  endif
 endif
+
+# If requested, try autodetecting from release files (see NetworkManager source)
+default_pam_config = get_option('default-pam-config')
+if default_pam_config == 'autodetect'
+  default_pam_config = distro
+endif
+
+# dconf paths, we should fix dconf.pc to provide us more real data though
+if dconf_dep.found()
+  dconf_prefix = dconf_dep.get_variable(pkgconfig: 'prefix')
+  dconf_sysconfig = (dconf_prefix == '/usr') ? '/etc' : dconf_prefix + '/etc/'
+  dconf_datadir = dconf_prefix / 'share'
+else
+  dconf_sysconfig = gdm_prefix / get_option('sysconfdir')
+  dconf_datadir = gdm_prefix / get_option('datadir')
+endif
+
+dconf_profiles_path = dconf_datadir / 'dconf' / 'profile'
 
 # Configuration
 conf = configuration_data()
@@ -199,16 +241,24 @@ conf.set_quoted('LIBDIR', gdm_prefix / get_option('libdir'))
 conf.set_quoted('LIBEXECDIR', gdm_prefix / get_option('libexecdir'))
 conf.set_quoted('LOGDIR', get_option('log-dir'))
 conf.set_quoted('DMCONFDIR', dmconfdir)
+conf.set_quoted('DISTRO', distro)
+conf.set_quoted('DCONF_SYSCONFIG', dconf_sysconfig)
+conf.set_quoted('DCONF_PROFILES_PATH', dconf_profiles_path)
 conf.set_quoted('GDMCONFDIR', gdmconfdir)
+conf.set_quoted('GDM_DATADIR', gdm_prefix / gdm_datadir)
 conf.set_quoted('GDM_SCREENSHOT_DIR', gdm_screenshot_dir)
 conf.set_quoted('GDM_XAUTH_DIR', gdm_xauth_dir)
+conf.set_quoted('GDM_PRIVATE_DBUS_DIR', gdm_private_dbus_dir)
 conf.set_quoted('GDM_RAN_ONCE_MARKER_DIR', ran_once_marker_dir)
 conf.set_quoted('GDM_RUN_DIR', gdm_run_dir)
+conf.set_quoted('GDM_DCONF_PROFILE', 'gdm')
+conf.set_quoted('GDM_WORKING_DIR', working_dir)
 conf.set_quoted('GNOMELOCALEDIR', gdm_prefix / get_option('localedir'))
 conf.set_quoted('AT_SPI_REGISTRYD_DIR', at_spi_registryd_dir)
 conf.set_quoted('GDM_PID_FILE', gdm_pid_file)
 conf.set_quoted('GNOME_SETTINGS_DAEMON_DIR', gnome_settings_daemon_dir)
 conf.set_quoted('LANG_CONFIG_FILE', lang_config_file)
+conf.set_quoted('PAM_PROFILES_DIR', pam_profiles_dir[0] == '/' ? pam_profiles_dir : '/' + pam_profiles_dir)
 conf.set('HAVE_ADT', have_adt)
 conf.set('HAVE_UTMP_H', have_utmp_header)
 conf.set('HAVE_UTMPX_H', have_utmpx_header)
@@ -224,9 +274,11 @@ conf.set('HAVE_PAM_SYSLOG', have_pam_syslog)
 conf.set('HAVE_KEYUTILS', keyutils_dep.found())
 conf.set('SUPPORTS_PAM_EXTENSIONS', pam_extensions_supported)
 conf.set('HAVE_SELINUX', libselinux_dep.found())
+conf.set('HAVE_XSERVER_WITH_LISTEN', xserver_has_listen)
 conf.set('ENABLE_USER_DISPLAY_SERVER', get_option('user-display-server'))
 conf.set('ENABLE_SYSTEMD_JOURNAL', get_option('systemd-journal'))
 conf.set('ENABLE_WAYLAND_SUPPORT', get_option('wayland-support'))
+conf.set('ENABLE_X11_SUPPORT', get_option('x11-support'))
 conf.set('ENABLE_PROFILING', get_option('profiling'))
 conf.set('GDM_INITIAL_VT', get_option('initial-vt'))
 conf.set_quoted('GDM_DEFAULTS_CONF', gdm_defaults_conf)
@@ -235,11 +287,12 @@ conf.set_quoted('GDM_RUNTIME_CONF', gdm_runtime_conf)
 conf.set_quoted('GDM_SESSION_DEFAULT_PATH', get_option('default-path'))
 conf.set_quoted('GDM_USERNAME', get_option('user'))
 conf.set_quoted('GDM_GROUPNAME', get_option('group'))
-conf.set('HAVE_LIBXDMCP', xdmcp_dep.found())
+conf.set('HAVE_LIBXDMCP', have_xdmcp)
 conf.set_quoted('SYSTEMD_X_SERVER', systemd_x_server)
 conf.set('WITH_PLYMOUTH', plymouth_dep.found())
 conf.set_quoted('X_SERVER', x_bin)
 conf.set_quoted('X_PATH', x_path)
+conf.set('HAVE_UDEV', gudev_dep.found())
 conf.set('HAVE_UT_UT_HOST', utmp_has_host_field)
 conf.set('HAVE_UT_UT_PID', utmp_has_pid_field)
 conf.set('HAVE_UT_UT_ID', utmp_has_id_field)
@@ -267,14 +320,15 @@ subdir('po')
 if libcheck_dep.found()
   subdir('tests')
 endif
-if xdmcp_dep.found()
+if have_xdmcp
   subdir('chooser')
 endif
 subdir('docs')
 
-meson.add_install_script('build-aux/meson_post_install.py')
+gnome.post_install(
+  glib_compile_schemas: true,
+)
 
-if meson.version().version_compare('>= 0.53')
 summary({
     'datadir': gdm_prefix / get_option('datadir'),
     'sysconfdir': gdm_prefix / get_option('sysconfdir'),
@@ -313,10 +367,12 @@ summary({
     'PAM Syslog': have_pam_syslog,
     'Supports PAM Extensions': pam_extensions_supported,
     'SeLinux': libselinux_dep.found(),
+    'Logind Provider': get_option('logind-provider'),
     'Use GDM Xsession': get_option('gdm-xsession'),
     'Use UserDisplayServer': get_option('user-display-server'),
     'Use SystemdJournal': get_option('systemd-journal'),
     'Use WaylandSupport': get_option('wayland-support'),
+    'Use X11Support': have_x11_support,
     'Use Profiling': get_option('profiling'),
     'Initial VT': get_option('initial-vt'),
     'Username': get_option('user'),
@@ -327,4 +383,3 @@ summary({
   section: 'Features',
   bool_yn: true,
 )
-endif

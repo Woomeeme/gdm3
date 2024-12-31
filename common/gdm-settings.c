@@ -83,6 +83,7 @@ gdm_settings_get_value (GdmSettings *settings,
         GList   *l;
 
         g_return_val_if_fail (GDM_IS_SETTINGS (settings), FALSE);
+        g_return_val_if_fail (settings->backends != NULL, FALSE);
         g_return_val_if_fail (key != NULL, FALSE);
 
         local_error = NULL;
@@ -120,7 +121,9 @@ gdm_settings_set_value (GdmSettings *settings,
         GList   *l;
 
         g_return_val_if_fail (GDM_IS_SETTINGS (settings), FALSE);
+        g_return_val_if_fail (settings->backends != NULL, FALSE);
         g_return_val_if_fail (key != NULL, FALSE);
+        g_return_val_if_fail (value != NULL, FALSE);
 
         g_debug ("Setting value %s", key);
 
@@ -184,11 +187,17 @@ backend_value_changed (GdmSettingsBackend *backend,
         g_signal_emit (settings, signals [VALUE_CHANGED], 0, key, old_value, new_value);
 }
 
-static void
-gdm_settings_init (GdmSettings *settings)
+void
+gdm_settings_reload (GdmSettings *settings)
 {
         GList *l;
         GdmSettingsBackend *backend;
+
+        g_return_if_fail (GDM_IS_SETTINGS (settings));
+
+        g_list_foreach (settings->backends, (GFunc) g_object_unref, NULL);
+        g_list_free (settings->backends);
+        settings->backends = NULL;
 
         backend = gdm_settings_desktop_backend_new (GDM_CUSTOM_CONF);
         if (backend)
@@ -206,6 +215,12 @@ gdm_settings_init (GdmSettings *settings)
                                   G_CALLBACK (backend_value_changed),
                                   settings);
         }
+}
+
+static void
+gdm_settings_init (GdmSettings *settings)
+{
+        gdm_settings_reload (settings);
 }
 
 static void

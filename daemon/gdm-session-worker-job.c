@@ -82,10 +82,6 @@ enum {
 
 static guint signals [LAST_SIGNAL] = { 0, };
 
-static void     gdm_session_worker_job_class_init       (GdmSessionWorkerJobClass *klass);
-static void     gdm_session_worker_job_init     (GdmSessionWorkerJob      *session_worker_job);
-static void     gdm_session_worker_job_finalize (GObject         *object);
-
 G_DEFINE_TYPE (GdmSessionWorkerJob, gdm_session_worker_job, G_TYPE_OBJECT)
 
 static void
@@ -176,7 +172,7 @@ static void
 copy_environment_to_hash (GdmSessionWorkerJob *job,
                           GHashTable          *hash)
 {
-        char **environment;
+        g_auto(GStrv) environment = NULL;
         gint   i;
 
         if (job->environment != NULL) {
@@ -184,59 +180,52 @@ copy_environment_to_hash (GdmSessionWorkerJob *job,
         } else {
                 environment = g_get_environ ();
         }
+
         for (i = 0; environment[i]; i++) {
-                char **parts;
+                g_auto(GStrv) parts = NULL;
 
                 parts = g_strsplit (environment[i], "=", 2);
 
                 if (parts[0] != NULL && parts[1] != NULL) {
                         g_hash_table_insert (hash, g_strdup (parts[0]), g_strdup (parts[1]));
                 }
-
-                g_strfreev (parts);
         }
-
-        g_strfreev (environment);
 }
 
 static GPtrArray *
 get_job_arguments (GdmSessionWorkerJob *job,
                    const char          *name)
 {
-        GPtrArray  *args;
-        GError     *error;
-        char      **argv;
+        g_autoptr(GPtrArray) args = NULL;
+        g_autoptr(GError) error = NULL;
+        g_auto(GStrv) argv = NULL;
         int         i;
 
         args = NULL;
-        argv = NULL;
-        error = NULL;
-        if (! g_shell_parse_argv (job->command, NULL, &argv, &error)) {
+        if (!g_shell_parse_argv (job->command, NULL, &argv, &error)) {
                 g_warning ("Could not parse command: %s", error->message);
-                g_error_free (error);
-                goto out;
+                return NULL;
         }
 
-        args = g_ptr_array_new ();
+        args = g_ptr_array_new_with_free_func (g_free);
         g_ptr_array_add (args, g_strdup (argv[0]));
         g_ptr_array_add (args, g_strdup (name));
         for (i = 1; argv[i] != NULL; i++) {
                 g_ptr_array_add (args, g_strdup (argv[i]));
         }
-        g_strfreev (argv);
 
         g_ptr_array_add (args, NULL);
-out:
-        return args;
+
+        return g_steal_pointer (&args);
 }
 
 static GPtrArray *
 get_job_environment (GdmSessionWorkerJob *job)
 {
-        GPtrArray     *env;
-        GHashTable    *hash;
+        g_autoptr(GPtrArray) env = NULL;
+        g_autoptr(GHashTable) hash = NULL;
 
-        env = g_ptr_array_new ();
+        env = g_ptr_array_new_with_free_func (g_free);
 
         /* create a hash table of current environment, then update keys has necessary */
         hash = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
@@ -249,23 +238,20 @@ get_job_environment (GdmSessionWorkerJob *job)
         }
 
         g_hash_table_foreach (hash, (GHFunc)listify_hash, env);
-        g_hash_table_destroy (hash);
 
         g_ptr_array_add (env, NULL);
 
-        return env;
+        return g_steal_pointer (&env);
 }
 
 static gboolean
 gdm_session_worker_job_spawn (GdmSessionWorkerJob *session_worker_job,
                               const char          *name)
 {
-        GError          *error;
+        g_autoptr(GError) error = NULL;
+        g_autoptr(GPtrArray) args = NULL;
+        g_autoptr(GPtrArray) env = NULL;
         gboolean         ret;
-        GPtrArray       *args;
-        GPtrArray       *env;
-
-        ret = FALSE;
 
         g_debug ("GdmSessionWorkerJob: Running session_worker_job process: %s %s",
                  name != NULL? name : "", session_worker_job->command);
@@ -277,7 +263,6 @@ gdm_session_worker_job_spawn (GdmSessionWorkerJob *session_worker_job,
         }
         env = get_job_environment (session_worker_job);
 
-        error = NULL;
         ret = g_spawn_async_with_pipes (NULL,
                                         (char **) args->pdata,
                                         (char **)env->pdata,
@@ -290,17 +275,10 @@ gdm_session_worker_job_spawn (GdmSessionWorkerJob *session_worker_job,
                                         NULL,
                                         &error);
 
-        g_ptr_array_foreach (args, (GFunc)g_free, NULL);
-        g_ptr_array_free (args, TRUE);
-
-        g_ptr_array_foreach (env, (GFunc)g_free, NULL);
-        g_ptr_array_free (env, TRUE);
-
         if (! ret) {
                 g_warning ("Could not start command '%s': %s",
                            session_worker_job->command,
                            error->message);
-                g_error_free (error);
         } else {
                 g_debug ("GdmSessionWorkerJob: : SessionWorkerJob on pid %d", (int)session_worker_job->pid);
         }
@@ -322,7 +300,9 @@ gboolean
 gdm_session_worker_job_start (GdmSessionWorkerJob *session_worker_job,
                               const char          *name)
 {
-        gboolean    res;
+        gboolean res;
+
+        g_return_val_if_fail (GDM_IS_SESSION_WORKER_JOB (session_worker_job), FALSE);
 
         g_debug ("GdmSessionWorkerJob: Starting worker...");
 
@@ -354,15 +334,14 @@ handle_session_worker_job_death (GdmSessionWorkerJob *session_worker_job)
 void
 gdm_session_worker_job_stop_now (GdmSessionWorkerJob *session_worker_job)
 {
+        g_return_if_fail (GDM_IS_SESSION_WORKER_JOB (session_worker_job));
+
         if (session_worker_job->pid <= 1) {
                 return;
         }
 
         /* remove watch source before we can wait on child */
-        if (session_worker_job->child_watch_id > 0) {
-                g_source_remove (session_worker_job->child_watch_id);
-                session_worker_job->child_watch_id = 0;
-        }
+        g_clear_handle_id (&session_worker_job->child_watch_id, g_source_remove);
 
         gdm_session_worker_job_stop (session_worker_job);
         handle_session_worker_job_death (session_worker_job);
@@ -372,6 +351,8 @@ void
 gdm_session_worker_job_stop (GdmSessionWorkerJob *session_worker_job)
 {
         int res;
+
+        g_return_if_fail (GDM_IS_SESSION_WORKER_JOB (session_worker_job));
 
         if (session_worker_job->pid <= 1) {
                 return;
@@ -419,6 +400,24 @@ gdm_session_worker_job_set_environment (GdmSessionWorkerJob *session_worker_job,
         g_return_if_fail (GDM_IS_SESSION_WORKER_JOB (session_worker_job));
 
         session_worker_job->environment = g_strdupv ((char **) environment);
+}
+
+static void
+gdm_session_worker_job_finalize (GObject *object)
+{
+        GdmSessionWorkerJob *session_worker_job;
+
+        g_return_if_fail (object != NULL);
+        g_return_if_fail (GDM_IS_SESSION_WORKER_JOB (object));
+
+        session_worker_job = GDM_SESSION_WORKER_JOB (object);
+
+        gdm_session_worker_job_stop (session_worker_job);
+
+        g_free (session_worker_job->command);
+        g_free (session_worker_job->server_address);
+
+        G_OBJECT_CLASS (gdm_session_worker_job_parent_class)->finalize (object);
 }
 
 static void
@@ -473,18 +472,12 @@ gdm_session_worker_job_get_property (GObject    *object,
         }
 }
 
-static GObject *
-gdm_session_worker_job_constructor (GType                  type,
-                                    guint                  n_construct_properties,
-                                    GObjectConstructParam *construct_properties)
+static void
+gdm_session_worker_job_init (GdmSessionWorkerJob *session_worker_job)
 {
-        GdmSessionWorkerJob      *session_worker_job;
+        session_worker_job->pid = -1;
 
-        session_worker_job = GDM_SESSION_WORKER_JOB (G_OBJECT_CLASS (gdm_session_worker_job_parent_class)->constructor (type,
-                                                                                       n_construct_properties,
-                                                                                       construct_properties));
-
-        return G_OBJECT (session_worker_job);
+        session_worker_job->command = g_strdup (LIBEXECDIR "/gdm-session-worker");
 }
 
 static void
@@ -494,7 +487,6 @@ gdm_session_worker_job_class_init (GdmSessionWorkerJobClass *klass)
 
         object_class->get_property = gdm_session_worker_job_get_property;
         object_class->set_property = gdm_session_worker_job_set_property;
-        object_class->constructor = gdm_session_worker_job_constructor;
         object_class->finalize = gdm_session_worker_job_finalize;
 
         g_object_class_install_property (object_class,
@@ -550,32 +542,6 @@ gdm_session_worker_job_class_init (GdmSessionWorkerJobClass *klass)
                               G_TYPE_NONE,
                               1,
                               G_TYPE_INT);
-}
-
-static void
-gdm_session_worker_job_init (GdmSessionWorkerJob *session_worker_job)
-{
-        session_worker_job->pid = -1;
-
-        session_worker_job->command = g_strdup (LIBEXECDIR "/gdm-session-worker");
-}
-
-static void
-gdm_session_worker_job_finalize (GObject *object)
-{
-        GdmSessionWorkerJob *session_worker_job;
-
-        g_return_if_fail (object != NULL);
-        g_return_if_fail (GDM_IS_SESSION_WORKER_JOB (object));
-
-        session_worker_job = GDM_SESSION_WORKER_JOB (object);
-
-        gdm_session_worker_job_stop (session_worker_job);
-
-        g_free (session_worker_job->command);
-        g_free (session_worker_job->server_address);
-
-        G_OBJECT_CLASS (gdm_session_worker_job_parent_class)->finalize (object);
 }
 
 GdmSessionWorkerJob *

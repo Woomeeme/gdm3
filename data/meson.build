@@ -28,7 +28,7 @@ configure_file(
   input: 'gdm.conf.in',
   output: '@BASENAME@',
   configuration: {
-    'GDM_USERNAME': get_option('user')
+    'GDM_USERNAME': get_option('user'),
   },
   install_dir: dbus_sys_dir,
 )
@@ -55,11 +55,11 @@ gdm_schema = configure_file(
     'GDM_GROUPNAME': get_option('group'),
     'gdmconfdir': gdmconfdir,
   },
-  install_dir: get_option('datadir') / 'gdm',
+  install_dir: gdm_datadir,
 )
 
 install_data('locale.alias',
-  install_dir: get_option('datadir') / 'gdm',
+  install_dir: gdm_datadir,
 )
 
 gdm_gnome_shell_component = 'org.gnome.Shell'
@@ -104,13 +104,11 @@ pam_data_files_map = {
     'gdm-fingerprint',
     'gdm-smartcard',
     'gdm-password',
-    'gdm-pin',
   ],
   'openembedded': [
     'gdm-autologin',
     'gdm-launch-environment',
     'gdm-password',
-    'gdm-pin',
   ],
   'exherbo': [
     'gdm-autologin',
@@ -118,7 +116,6 @@ pam_data_files_map = {
     'gdm-fingerprint',
     'gdm-smartcard',
     'gdm-password',
-    'gdm-pin',
   ],
   'lfs': [
     'gdm-autologin',
@@ -126,7 +123,6 @@ pam_data_files_map = {
     'gdm-fingerprint',
     'gdm-smartcard',
     'gdm-password',
-    'gdm-pin',
   ],
   'arch': [
     'gdm-autologin',
@@ -135,27 +131,26 @@ pam_data_files_map = {
     'gdm-smartcard',
     'gdm-password',
   ],
-  'none': [],
-  # We should no longer have 'autodetect' at this point
 }
 
-pam_data_files = pam_data_files_map[default_pam_config]
-pam_prefix = (get_option('pam-prefix') != '')? get_option('pam-prefix') : get_option('sysconfdir')
+pam_data_files = pam_data_files_map.get(default_pam_config, [])
 foreach _pam_filename : pam_data_files
   install_data('pam-@0@/@1@.pam'.format(default_pam_config, _pam_filename),
     rename: _pam_filename,
-    install_dir: pam_prefix / 'pam.d',
+    install_dir: pam_profiles_dir,
   )
 endforeach
 
-gdm_rules = configure_file(
-  input: '61-gdm.rules.in',
-  output: '@BASENAME@',
-  configuration: {
-    'libexecdir': gdm_prefix / get_option('libexecdir'),
-  },
-  install_dir: udev_dir,
-)
+if have_x11_support
+  configure_file(
+    input: '61-gdm.rules.in',
+    output: '@BASENAME@',
+    configuration: {
+      'libexecdir': gdm_prefix / get_option('libexecdir'),
+    },
+    install_dir: udev_dir,
+  )
+endif
 
 # DBus service files
 service_config = configuration_data()
@@ -168,44 +163,56 @@ else
   service_config.set('PLYMOUTH_QUIT_SERVICE', '')
 endif
 
-if get_option('systemdsystemunitdir') != ''
-  systemd_systemunitdir = get_option('systemdsystemunitdir')
-else
-  systemd_systemunitdir = systemd_dep.get_pkgconfig_variable('systemdsystemunitdir')
+systemdsystemunitdir = get_option('systemdsystemunitdir')
+if systemdsystemunitdir != 'no'
+  if get_option('systemdsystemunitdir') != ''
+    systemd_systemunitdir = get_option('systemdsystemunitdir')
+  else
+    assert(systemd_dep.found(), 'systemd required but not found, please provide a valid systemd system unit dir or disable it')
+    systemd_systemunitdir = systemd_dep.get_variable(pkgconfig: 'systemdsystemunitdir')
+  endif
 endif
 
-if get_option('systemduserunitdir') != ''
-  systemd_userunitdir = get_option('systemduserunitdir')
-else
-  systemd_userunitdir = systemd_dep.get_pkgconfig_variable('systemduserunitdir',
-                                                           define_variable: ['prefix', get_option('prefix')])
+systemduserunitdir = get_option('systemduserunitdir')
+if systemduserunitdir != 'no'
+  if get_option('systemduserunitdir') != ''
+    systemd_userunitdir = get_option('systemduserunitdir')
+  else
+    assert(systemd_dep.found(), 'systemd required but not found, please provide a valid systemd user unit dir or disable it')
+    systemd_userunitdir = systemd_dep.get_variable(pkgconfig: 'systemduserunitdir',
+                                                   pkgconfig_define: ['prefix', get_option('prefix')])
+  endif
 endif
 
-configure_file(
-  input: 'gdm.service.in',
-  output: '@BASENAME@',
-  configuration: service_config,
-  install_dir: systemd_systemunitdir,
-  format: 'cmake'
-)
+if systemdsystemunitdir != 'no'
+  configure_file(
+    input: 'gdm.service.in',
+    output: '@BASENAME@',
+    configuration: service_config,
+    install_dir: systemd_systemunitdir,
+    format: 'cmake'
+  )
+endif
 
 gdm_gnome_session_wanted_targets = []
 foreach component: gdm_gnome_user_session_wanted_components
   gdm_gnome_session_wanted_targets += 'Wants=@0@.target'.format(component)
 endforeach
 
-configure_file(
-  input: 'session.conf.in',
-  output: 'session.conf',
-  configuration: {
-    'requires_component': gdm_gnome_shell_component,
-    'wants_required_components': '\n'.join(gdm_gnome_session_wanted_targets),
-  },
-  install_dir: systemd_userunitdir / 'gnome-session@gnome-login.target.d',
-)
+if systemduserunitdir != 'no'
+  configure_file(
+    input: 'session.conf.in',
+    output: 'session.conf',
+    configuration: {
+      'requires_component': gdm_gnome_shell_component,
+      'wants_required_components': '\n'.join(gdm_gnome_session_wanted_targets),
+    },
+    install_dir: systemd_userunitdir / 'gnome-session@gnome-login.target.d',
+  )
+endif
 
 # XSession
-if get_option('gdm-xsession')
+if get_option('gdm-xsession') and have_x11_support
   configure_file(
     input: 'Xsession.in',
     output: '@BASENAME@',

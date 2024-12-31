@@ -176,20 +176,20 @@
       </para>
 
       <para>
-        For discussion or queries about GDM, refer to the
-        <address><email>gdm-list@gnome.org</email></address> mail list.  This
-        list is archived, and is a good resource to check to seek answers to
-        common questions.  This list is archived at
-        <ulink type="http" url="http://mail.gnome.org/archives/gdm-list/">
-        http://mail.gnome.org/archives/gdm-list/</ulink> and has a search
+        For discussion or queries about GDM, refer to the discussion forum at
+        <ulink type="http" url="https://discourse.gnome.org/tag/gdm">
+        https://discourse.gnome.org/tag/gdm</ulink>.
+        The archives of the previous mailing list are also a good resource to
+        check to seek answers to common questions. The list was archived at
+        <ulink type="http" url="https://mail.gnome.org/archives/gdm-list/">
+        https://mail.gnome.org/archives/gdm-list/</ulink> and has a search
         facility to look for messages with keywords.
       </para>
 
       <para>
-        Please submit any bug reports or enhancement requests to the
-        "gdm" category in
-        <ulink type="http" url="http://bugzilla.gnome.org/">
-        http://bugzilla.gnome.org</ulink>.
+        Please submit any bug reports or enhancement requests to
+        <ulink type="http" url="https://gitlab.gnome.org/GNOME/gdm/-/issues/">
+        https://gitlab.gnome.org/GNOME/gdm/-/issues/</ulink>.
       </para>
     </sect2>
 
@@ -667,10 +667,7 @@
         mechanisms (such as a fingerprint or SmartCard reader), then you should
         implement this by using a PAM service module for the desired
         authentication type rather than by trying to modify the GDM code
-        directly.  Refer to the PAM documentation on your system.  How to do
-        this is frequently discussed on the 
-        <address><email>gdm-list@gnome.org</email></address> mail list,
-        so you can refer to the list archives for more information.
+        directly.  Refer to the PAM documentation on your system.
       </para>
 
       <para>
@@ -1264,7 +1261,7 @@ TimedLogin=you
               <synopsis>User=gdm</synopsis>
               <para>
                 The username under which the greeter and other GUI programs
-                are run.  Refer to the <filename>Group</filename>
+                are run.  Refer to the <filename>User</filename>
                 configuration key and to the "Security->GDM User And
                 Group" section of this document for more information.
               </para>
@@ -1277,7 +1274,7 @@ TimedLogin=you
               <synopsis>Group=gdm</synopsis>
               <para>
                 The group name under which the greeter and other GUI programs
-                are run.  Refer to the <filename>User</filename>
+                are run.  Refer to the <filename>Group</filename>
                 configuration key and to the "Security->GDM User And
                 Group" section of this document for more information.
               </para>
@@ -1304,73 +1301,6 @@ TimedLogin=you
                 system log file (<filename>&lt;var&gt;/log/messages</filename>
                 or <filename>&lt;var&gt;/adm/messages</filename> depending on
                 your Operating System).
-              </para>
-            </listitem>
-          </varlistentry>
-        </variablelist>
-      </sect3>
-
-      <sect3 id="greetersection">
-        <title>Greeter Options</title>
-      
-        <variablelist>
-          <title>[greeter]</title>
-          
-          <varlistentry>
-            <term>IncludeAll</term>
-            <listitem>
-              <synopsis>IncludeAll=true</synopsis>
-              <para>
-                If true, then the face browser will show all users on the local
-                machine.  If false, the face browser will only show users who
-                have recently logged in.
-              </para>
-
-              <para>
-                When this key is true, GDM will call fgetpwent() to get a list
-                of local users on the system.  Any users with a user id less
-                than 500 (or 100 if running on Oracle Solaris) are filtered
-                out.  The Face Browser also will display any users that have
-                previously logged in on the system  (for example NIS/LDAP
-                users).  It gets this list via calling the
-                <command>ck-history</command> ConsoleKit interface.  It will
-                also filter out any users which do not have a valid shell
-                (valid shells are any shell that getusershell() returns -
-                /sbin/nologin or /bin/false are considered invalid shells even
-                if getusershell() returns them).
-              </para>
-
-              <para>
-                If false, then GDM more simply only displays users that have
-                previously logged in on the system (local or NIS/LDAP users) by
-                calling the <command>ck-history</command> ConsoleKit interface.
-              </para>
-            </listitem>
-          </varlistentry>
-
-          <varlistentry>
-            <term>Include</term>
-            <listitem>
-              <synopsis>Include=</synopsis>
-              <para>
-                Set to a list of users to always include in the Face Browser.
-                This value is set to a list of users separated by commas.  By
-                default, the value is empty.
-              </para>
-            </listitem>
-          </varlistentry>
-
-          <varlistentry>
-            <term>Exclude</term>
-            <listitem>
-              <synopsis>Exclude=bin,root,daemon,adm,lp,sync,shutdown,halt,mail,news,uucp,operator,nobody,nobody4,noaccess,postgres,pvm,rpm,nfsnobody,pcap</synopsis>
-              <para>
-                Set to a list of users to always exclude in the Face Browser.
-                This value is set to a list of users separated by commas.  Note
-                that the setting in the <filename>custom.conf</filename>
-                overrides the default value, so if you wish to add additional
-                users to the list, then you need to set the value to the
-                default value with additional users appended to the list.
               </para>
             </listitem>
           </varlistentry>
@@ -1540,31 +1470,6 @@ gdm:.my.domain
                 other displays.  The information may be forgotten earlier if
                 there are more hosts trying to send indirect queries then
                 <filename>MaxPendingIndirect</filename>.
-              </para>
-            </listitem>
-          </varlistentry>
-        
-          <varlistentry>
-            <term>PingIntervalSeconds</term>
-            <listitem>
-              <synopsis>PingIntervalSeconds=60</synopsis>
-              <para>
-                If the Xserver does not respond in the specified number of
-                seconds, then the connection is stopped and the session ended.
-                When this happens the daemon dies with an ALARM signal.
-                Note that GDM 2.20 and earlier multiplied this setting by 2,
-                so it may be necessary to increase the timeout if upgrading
-                from GDM 2.20 and earlier to a newer version.
-              </para>
-
-              <para>
-                Note that GDM in the past used to have a
-                <filename>PingInterval</filename> configuration key which was
-                also in minutes.  For most purposes you'd want this setting
-                to be lower than one minute. However since in most cases where
-                XDMCP would be used (such as terminal labs), a lag of more
-                than 15 or so seconds would really mean that the terminal was
-                turned off or restarted and you would want to end the session.
               </para>
             </listitem>
           </varlistentry>

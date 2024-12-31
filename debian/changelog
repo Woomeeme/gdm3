@@ -1,3 +1,329 @@
+gdm3 (47.0-3) unstable; urgency=medium
+
+  * Team upload
+  * d/tests/control: Don't test gdm3 on armel.
+    The library is available on armel, but the daemon is not.
+
+ -- Simon McVittie <smcv@debian.org>  Sat, 21 Sep 2024 14:45:40 +0100
+
+gdm3 (47.0-2) unstable; urgency=medium
+
+  * Release to unstable
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 18 Sep 2024 09:55:29 -0400
+
+gdm3 (47.0-1) experimental; urgency=medium
+
+  [ Simon McVittie ]
+  * New upstream release candidate 47
+  * d/rules: Explicitly enable X11 support.
+    If upstream disables this in some future release, we'll want it to be
+    an intentional decision whether we follow that.
+  * d/control: Drop dependency on libcanberra-gtk, no longer checked
+  * d/control: Don't build gdm3 binary package on armel.
+    gdm3 requires GNOME Shell, which is unlikely to be practically useful
+    on the older ARM machines that can't run armhf or arm64. GNOME Shell
+    also requires gjs, which is likely to be removed from armel.
+    (Helps: #1080521)
+  * Standards-Version: 4.7.0 (no changes required)
+  * Update Lintian overrides
+  * d/control: Add ${gir:Provides} to libgdm-dev
+
+  [ Marco Trevisan (Treviño) ]
+  * New upstream release 47.0
+  * debian: Drop gdm-screenshot references, as it has been removed upstream
+
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Mon, 16 Sep 2024 17:32:15 +0200
+
+gdm3 (46.2-1) unstable; urgency=medium
+
+  [ Jeremy Bícha ]
+  * New upstream release
+  * Drop 2 patches applied in new release
+
+  [ Sebastian Andrzej Siewior ]
+  * Adapt autopkgtest for openssl3.2 (Closes: #1061458)
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Mon, 01 Jul 2024 07:45:23 -0400
+
+gdm3 (46.0-2) unstable; urgency=medium
+
+  * debian/rules: Set the distro as debian
+  * debian/patches/gdm-auth-config-debian: Install hook for gdm-config.
+    This is distro-specific configuration that gdm allows distro to
+    configure so add the debian version for it and install it /usr/libexec
+  * debian/patches: Refresh indexes
+  * debian/patches: Cherry-pick upstream fixes:
+     - manager: Move g-i-s chown to when PAM authentication completed
+     - udev rules: Add check for nvidia S0ix suspend
+
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Thu, 04 Apr 2024 05:51:44 +0200
+
+gdm3 (46.0-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Mon, 01 Apr 2024 08:03:50 -0400
+
+gdm3 (46~rc-1) unstable; urgency=medium
+
+  * New upstream release
+  * Add Build-Depends: libjson-glib-dev
+  * debian/libgdm1.symbols: Add new symbols
+  * debian/gdm3.install: Install /usr/bin/gdm-config
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Fri, 15 Mar 2024 13:41:09 -0400
+
+gdm3 (45.0.1-3) unstable; urgency=medium
+
+  * Team upload
+
+  [ Simon McVittie ]
+  * d/control: Stop generating from d/control.in
+  * d/control: Remove unnecessary B-D on systemd, udev.
+    This package already build-depends on systemd-dev. (Closes: #1060507)
+  * d/gdm3.lintian-overrides: Update to accomodate merged /usr
+  * d/gdm3.lintian-overrides: Add an override for #1031037
+  * d/source/lintian-overrides: Silence warnings for local dh-exec
+    substitutions
+
+  [ Dandan Zhang ]
+  * Add loong64 to the list of architectures where gjs is available
+    (Closes: #1058673)
+
+  [ Michael Biebl ]
+  * Install PAM module into /usr (Closes: #1061244)
+
+ -- Michael Biebl <biebl@debian.org>  Wed, 31 Jan 2024 14:56:12 +0100
+
+gdm3 (45.0.1-2) unstable; urgency=medium
+
+  * debian/gdm3.gdm-smartcard-pkcs11-exclusive.pam: Make Smart Card module
+    really exclusive
+    pam_pkcs11 may stil return PAM_IGNORE in case of smart-card errors if no
+    card_only is parameter is provided, potentially leading to an unexpected
+    login.
+    This should not be an issue anymore in recent versions of this service
+    files since we always fallback to password auth, but it's still a bug
+    since we should not really fallback to password if this service file is
+    selected. (LP: #2017870)
+
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Sat, 23 Dec 2023 03:29:50 +0100
+
+gdm3 (45.0.1-1) unstable; urgency=high
+
+  * Team upload
+
+  [ Marco Trevisan (Treviño) ]
+  * debian/gdm3.gdm-smartcard-*: Always fallback to password auth if no SC
+    pam module is installed.
+    Both libpam_sss.so and libpam_pkcs11.so might be not be installed in a
+    system, in such case we should not make gdm to enforce the smartcart
+    authentication because that would just lock the user out if there are
+    other login allowed methods.
+    As per this, make these modules partially optional even in the exclusive
+    mode, given that we have not a strong dependency on such modules and so
+    inserting a smartcard is not enough to block a system, unless that's
+    configured.
+    Ideally we should not even try to proceed if the system is not fully
+    configured for smartcards, but that's something that can't be easily
+    controlled from modules settings, so let's just do the quickest thing.
+    (Mitigates: #1051659, #1051785)
+  * d/tests/sssd-softhism2-certificates-tests.sh: Cherry-pick upstream fixes
+
+  [ Simon McVittie ]
+  * New upstream release
+    - Fix an intermittent crash when unlocking the screen
+    - Translation updates: en_GB, ko, sv
+  * d/gdm3.links: Create a dconf profile named for the Debian-gdm user.
+    In upstream and Ubuntu gdm, the system username used for the greeter
+    is "gdm", but in Debian, for historical reasons it is "Debian-gdm".
+    Before version 45, the dconf profile name "gdm" was hard-coded,
+    but since version 45 it uses a profile name that matches the system
+    username (to allow gnome-initial-setup to have its own profile).
+    This resulted in the gdm greeter trying to use the ordinary
+    gnome.session instead of gnome-login.session, which caused login to
+    fail when the gnome-session package was not installed, and caused
+    settings in /etc/gdm3/greeter.dconf-defaults to be ineffective. Other
+    differences between gnome.session and gnome-login.session, potentially
+    including security hardening for the greeter, would also not have
+    been effective.
+    (Closes: #1052374, #1051671, #1051993)
+  * Set high urgency for the dconf profile fix
+
+  [ Helmut Grohne ]
+  * Avoid FTBFS when systemdsystemunitdir changes in systemd.pc
+    (Closes: #1052381)
+
+ -- Simon McVittie <smcv@debian.org>  Thu, 21 Sep 2023 13:12:44 +0100
+
+gdm3 (45~beta-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Thu, 07 Sep 2023 09:28:08 -0400
+
+gdm3 (44.1-2) unstable; urgency=medium
+
+  * Clean up some old package relationships
+  * Release to unstable
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Sun, 23 Jul 2023 16:10:57 -0400
+
+gdm3 (44.1-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Jarred Wilson <jarred.wilson@canonical.com>  Mon, 15 May 2023 12:39:35 -0400
+
+gdm3 (44.0-1) experimental; urgency=medium
+
+  [ Jeremy Bicha ]
+  * New upstream release
+  * debian/control.in: Bump minimum meson to 0.57
+
+  [ Simon McVittie ]
+  * d/tests: Don't reset root password
+  * d/tests: Explicitly use blank input when checking for blank password
+
+  [ Marco Trevisan (Treviño) ]
+  * debian/tests/control: Add explicit dependency on libpam-sss
+  * debian/gdm3.install: Do not list config files, just install all gdm3 ones
+  * debian/tests/sssd-gdm-smartcard-pam-auth-tester.sh: Some minor cleanups
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Mon, 27 Mar 2023 15:32:48 -0400
+
+gdm3 (43.0-3) unstable; urgency=medium
+
+  * Team upload
+
+  [ Marco Trevisan (Treviño) ]
+  * debian/tests/control: Use multi-line Test-Command for easier
+    maintenance
+  * debian/tests/sssd-gdm-smartcard-pam-auth-tester.sh:
+    Assert that entering the wrong PIN leads to authentication failure
+
+  [ Patrice Duroux ]
+  * d/rules: Generate one man page at a time.
+    Otherwise, the content of one arbitrary .pod file gets duplicated into
+    each of the man pages. (Closes: #1029839)
+
+  [ Simon McVittie ]
+  * d/tests: Avoid autopkgtest failure if test user has blank password.
+    If the test user has a blank password (which might be the case in an
+    expendable test VM) and PAM accepts blank passwords, then
+    gdm-smartcard-sssd-or-password will always authenticate successfully.
+    If that's the case, temporarily change the user's password to be
+    non-empty while running our tests. Also do the same for root.
+  * Move dbus-daemon security policy from /etc to /usr/share
+  * d/control.in: Drop unnecessary dependency on lsb-base
+  * d/control.in: Remove Multi-Arch: same from gir1.2-gdm-1.0.
+    It is not usefully multi-arch co-installable because it depends on
+    libgdm1, which contains /usr/bin/gdmflexiserver.
+  * d/po/sv.po: Transcode from ISO-8859-1 to UTF-8
+  * Update syntax of Lintian overrides
+  * Standards-Version: 4.6.2 (no changes required)
+
+ -- Simon McVittie <smcv@debian.org>  Sun, 29 Jan 2023 17:32:20 +0000
+
+gdm3 (43.0-2) unstable; urgency=medium
+
+  * debian/gdm3-gdm-smartcard*: Do not fail if pam_succeed_if suceeded.
+    We were not handling the success case in pam_succeed_if.so, and so even
+    if other modules were successful, gdm-smartcard was failing with a
+    permission denied error, because the pam_succeed_if default was bad, and
+    this was applied to the success case too.
+    Alternatively we could even just use success=ignore here, but it's
+    better to be consistent with other usages. (LP: #1999884)
+  * debian/gdm3.gdm-smartcard-sssd-or-password.pam: Always load gnome keyring
+    and nologin.
+    Ensure that we load the nologin and gnome-key-ring modules also if sss
+    module succeeded.
+  * debian/tests: Add autopkg tests testing gdm smartcard authentication.
+    Create fake certificates from fake CA's and verify they can be used with
+    from a virtual smartcard.
+
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Sat, 28 Jan 2023 09:57:53 +0100
+
+gdm3 (43.0-1) unstable; urgency=medium
+
+  [ Jeremy Bicha ]
+  * New upstream release
+  * debian/control.in: Build gdm3 on armel since gjs & mozjs102
+    are built there now
+  * Release to unstable
+
+  [ Simon McVittie ]
+  * d/control.in: Depend on polkitd instead of policykit-1
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Sat, 24 Sep 2022 23:48:19 -0400
+
+gdm3 (42.0-2) experimental; urgency=medium
+
+  * Team upload
+  * Only build gdm3 on architectures with working mozjs102 and gjs.
+    gjs is likely to be removed from armel as part of the move to mozjs102
+    (see #1018076), and is unbuildable or fails tests on most non-release
+    architectures. gdm3 requires gnome-shell at runtime, which requires gjs.
+    To avoid having an uninstallable gdm3 package, only build it on
+    architectures where gjs is known to be available.
+  * NEWS: Use correct version number and suite (Closes: #1008663)
+  * Standards-Version: 4.6.1 (no changes required)
+  * Upload to experimental: unstable upload will be done as part of #1018076
+
+ -- Simon McVittie <smcv@debian.org>  Wed, 31 Aug 2022 11:36:12 +0100
+
+gdm3 (42.0-1) unstable; urgency=medium
+
+  [ Jeremy Bicha ]
+  * New upstream release
+    - Fix hang caused by GDM starting sooner than nvidia_drm
+      (Closes: #1004131, LP: #1958488)
+    - Default to Wayland for nvidia 510 drivers (LP: #1962523)
+  * debian/control.in: Build-Depend on libgudev-1.0-dev
+
+  [ Simon McVittie ]
+  * Add a NEWS.Debian entry for the removal of "System X11 Default"
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Tue, 22 Mar 2022 16:45:54 -0400
+
+gdm3 (41.3-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+    - Explicitly pass "-listen tcp" to Xorg if configured with
+      DisallowTCP=false (Closes: #785495). Please note that this
+      configuration continues to be insecure if you have any untrusted
+      devices on your LAN, including games consoles, smart lightbulbs
+      and other embedded devices.
+    - libgdm: Handle GDM_SUPPORTED_SESSION_TYPES being unset
+    - Keep wayland enabled for simple-framebuffer DRM drivers
+    - Restart greeter session if it crashes
+    - Translation updates
+    - Various other fixes that were already included as patches in Debian
+  * Drop patches that were taken from upstream
+  * Generically depend on any logind implementation on Linux
+    (Closes: #991880)
+  * Change uid to Debian-gdm for all accesses to /var/lib/gdm3, which is
+    safer than manipulating a non-root-owned directory as root
+    - d/generate-config: Create /var/lib/gdm3 if needed, but subsequently
+      don't change anything as root
+    - d/generate-config: Run `dconf compile` as Debian-gdm
+    - d/generate-config: Run pkill as Debian-gdm too, while we're there
+    - d/gdm3.postinst: Don't create /var/lib/gdm3, it will be created on
+      a just-in-time basis by d/generate-config
+    - d/gdm3.postinst: Don't change ownership of /var/lib/gdm3
+    - d/gdm3.dirs: Don't ship root-owned directories which will become
+      owned by Debian-gdm on running systems
+  * Update spelling of Lintian overrides
+  * Silence Lintian false positive for
+    package-supports-alternative-init-but-no-init.d-script.
+    /etc/init.d/gdm3 is the LSB equivalent of both gdm3.service and
+    gdm.service.
+  * d/gdm3.dirs: Drop unnecessary directories
+
+ -- Simon McVittie <smcv@debian.org>  Sat, 29 Jan 2022 18:28:14 +0000
+
 gdm3 (41.0-3) unstable; urgency=medium
 
   * Team upload

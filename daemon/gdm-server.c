@@ -53,7 +53,9 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 
+#ifdef ENABLE_X11_SUPPORT
 #include <X11/Xlib.h> /* for Display */
+#endif
 
 #include "gdm-common.h"
 #include "gdm-settings-direct.h"
@@ -275,7 +277,8 @@ gdm_server_resolve_command_line (GdmServer  *server,
 
         gdm_server_init_command (server);
 
-        g_shell_parse_argv (server->command, &argc, &argv, NULL);
+        if (!g_shell_parse_argv (server->command, &argc, &argv, NULL))
+                return FALSE;
 
         for (len = 0; argv != NULL && argv[len] != NULL; len++) {
                 char *arg = argv[len];
@@ -317,18 +320,19 @@ gdm_server_resolve_command_line (GdmServer  *server,
          * by default anymore. In older versions we need to pass
          * -nolisten tcp to disable listening on tcp sockets.
          */
-#ifdef HAVE_XSERVER_THAT_DEFAULTS_TO_LOCAL_ONLY
-        if (!server->disable_tcp && ! query_in_arglist) {
-                argv[len++] = g_strdup ("-listen");
-                argv[len++] = g_strdup ("tcp");
-        }
-#else
-        if (server->disable_tcp && ! query_in_arglist) {
-                argv[len++] = g_strdup ("-nolisten");
-                argv[len++] = g_strdup ("tcp");
-        }
+        if (!query_in_arglist) {
+                if (server->disable_tcp) {
+                        argv[len++] = g_strdup ("-nolisten");
+                        argv[len++] = g_strdup ("tcp");
+                }
 
+#ifdef HAVE_XSERVER_WITH_LISTEN
+                if (!server->disable_tcp) {
+                        argv[len++] = g_strdup ("-listen");
+                        argv[len++] = g_strdup ("tcp");
+                }
 #endif
+        }
 
         if (vtarg != NULL && ! gotvtarg) {
                 argv[len++] = g_strdup (vtarg);
@@ -427,15 +431,9 @@ gdm_server_setup_journal_fds (GdmServer *server)
 #ifdef ENABLE_SYSTEMD_JOURNAL
     if (sd_booted () > 0) {
         int out, err;
-        const char *prefix = "gdm-Xorg-";
-        char *identifier;
-        gsize size;
+        g_autofree char *identifier = NULL;
 
-        size = strlen (prefix) + strlen (server->display_name) + 1;
-        identifier = g_alloca (size);
-        strcpy (identifier, prefix);
-        strcat (identifier, server->display_name);
-        identifier[size - 1] = '\0';
+        identifier = g_strdup_printf("gdm-Xorg-%s", server->display_name);
 
         out = sd_journal_stream_fd (identifier, LOG_INFO, FALSE);
         if (out < 0)
@@ -675,10 +673,13 @@ gdm_server_spawn (GdmServer    *server,
         /* Figure out the server command */
         argv = NULL;
         argc = 0;
-        gdm_server_resolve_command_line (server,
-                                         vtarg,
-                                         &argc,
-                                         &argv);
+
+        if (!gdm_server_resolve_command_line (server,
+                                              vtarg,
+                                              &argc,
+                                              &argv)) {
+                return FALSE;
+        }
 
         if (server->session_args) {
                 server_add_xserver_args (server, &argc, &argv);
@@ -751,6 +752,8 @@ gdm_server_start (GdmServer *server)
         GError *local_error = NULL;
         GError **error = &local_error;
 
+        g_return_val_if_fail (GDM_IS_SERVER (server), FALSE);
+
         /* Hardcode the VT for the initial X server, but nothing else */
         if (server->is_initial) {
                 vtarg = "vt" G_STRINGIFY (GDM_INITIAL_VT);
@@ -801,21 +804,19 @@ gdm_server_stop (GdmServer *server)
 {
         int res;
 
+        g_return_val_if_fail (GDM_IS_SERVER (server), FALSE);
+
         if (server->pid <= 1) {
                 return TRUE;
         }
 
         /* remove watch source before we can wait on child */
-        if (server->child_watch_id > 0) {
-                g_source_remove (server->child_watch_id);
-                server->child_watch_id = 0;
-        }
+        g_clear_handle_id (&server->child_watch_id, g_source_remove);
 
         g_debug ("GdmServer: Stopping server");
 
         res = gdm_signal_pid (server->pid, SIGTERM);
-        if (res < 0) {
-        } else {
+        if (res >= 0) {
                 server_died (server);
         }
 

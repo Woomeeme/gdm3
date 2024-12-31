@@ -918,10 +918,10 @@ set_port_for_request (GdmAddress *address,
 
         switch (ss->ss_family) {
         case AF_INET:
-                port->data = (CARD8 *)g_memdup (&(SIN (ss)->sin_port), port->length);
+                port->data = (CARD8 *)g_memdup2 (&(SIN (ss)->sin_port), port->length);
                 break;
         case AF_INET6:
-                port->data = (CARD8 *)g_memdup (&(SIN6 (ss)->sin6_port), port->length);
+                port->data = (CARD8 *)g_memdup2 (&(SIN6 (ss)->sin6_port), port->length);
                 break;
         default:
                 port->data = NULL;
@@ -940,11 +940,11 @@ set_address_for_request (GdmAddress *address,
         switch (ss->ss_family) {
         case AF_INET:
                 addr->length = sizeof (struct in_addr);
-                addr->data = g_memdup (&SIN (ss)->sin_addr, addr->length);
+                addr->data = g_memdup2 (&SIN (ss)->sin_addr, addr->length);
                 break;
         case AF_INET6:
                 addr->length = sizeof (struct in6_addr);
-                addr->data = g_memdup (&SIN6 (ss)->sin6_addr, addr->length);
+                addr->data = g_memdup2 (&SIN6 (ss)->sin6_addr, addr->length);
                 break;
         default:
                 addr->length = 0;
@@ -2131,6 +2131,7 @@ gdm_xdmcp_display_create (GdmXdmcpDisplayFactory *factory,
         GdmDisplay      *display;
         GdmDisplayStore *store;
         gboolean         use_chooser;
+        const char      *session_types[] = { "x11", NULL };
 
         g_debug ("GdmXdmcpDisplayFactory: Creating xdmcp display for %s:%d",
                 hostname ? hostname : "(null)", displaynum);
@@ -2164,6 +2165,11 @@ gdm_xdmcp_display_create (GdmXdmcpDisplayFactory *factory,
         if (display == NULL) {
                 goto out;
         }
+
+        g_object_set (G_OBJECT (display),
+                      "session-type", session_types[0],
+                      "supported-session-types", session_types,
+                      NULL);
 
         if (! gdm_display_prepare (display)) {
                 gdm_display_unmanage (display);
@@ -3104,10 +3110,7 @@ gdm_xdmcp_display_factory_stop (GdmDisplayFactory *base_factory)
         g_return_val_if_fail (GDM_IS_XDMCP_DISPLAY_FACTORY (factory), FALSE);
         g_return_val_if_fail (factory->socket_fd != -1, FALSE);
 
-        if (factory->socket_watch_id > 0) {
-                g_source_remove (factory->socket_watch_id);
-                factory->socket_watch_id = 0;
-        }
+        g_clear_handle_id (&factory->socket_watch_id, g_source_remove);
 
         if (factory->socket_fd > 0) {
                 VE_IGNORE_EINTR (close (factory->socket_fd));
@@ -3441,9 +3444,7 @@ gdm_xdmcp_display_factory_finalize (GObject *object)
 
         g_return_if_fail (factory != NULL);
 
-        if (factory->socket_watch_id > 0) {
-                g_source_remove (factory->socket_watch_id);
-        }
+        g_clear_handle_id (&factory->socket_watch_id, g_source_remove);
 
         if (factory->socket_fd > 0) {
                 close (factory->socket_fd);

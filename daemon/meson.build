@@ -23,6 +23,18 @@ local_display_factory_dbus_gen = gnome.gdbus_codegen('gdm-local-display-factory-
   interface_prefix: 'org.gnome.DisplayManager',
   autocleanup: 'all',
 )
+remote_display_dbus_gen = gnome.gdbus_codegen('gdm-remote-display-glue',
+  'gdm-remote-display.xml',
+  namespace: 'GdmDBus',
+  interface_prefix: 'org.gnome.DisplayManager',
+  autocleanup: 'all',
+)
+remote_display_factory_dbus_gen = gnome.gdbus_codegen('gdm-remote-display-factory-glue',
+  'gdm-remote-display-factory.xml',
+  namespace: 'GdmDBus',
+  interface_prefix: 'org.gnome.DisplayManager',
+  autocleanup: 'all',
+)
 manager_dbus_gen = gnome.gdbus_codegen('gdm-manager-glue',
   'gdm-manager.xml',
   namespace: 'GdmDBus',
@@ -60,12 +72,17 @@ gdm_daemon_deps = [
   gobject_dep,
   gio_dep,
   gio_unix_dep,
+  json_glib,
   libpam_dep,
-  x_deps,
-  xcb_dep,
 ]
+if have_x11_support
+  gdm_daemon_deps += [
+    xcb_dep,
+    x_deps,
+  ]
+endif
 
-if xdmcp_dep.found() and get_option('tcp-wrappers')
+if have_xdmcp and get_option('tcp-wrappers')
   gdm_daemon_deps += libwrap_dep
 endif
 
@@ -148,18 +165,20 @@ gdm_wayland_session = executable('gdm-wayland-session',
 )
 
 # X session
-gdm_x_session_src = [
-  'gdm-x-session.c',
-  manager_dbus_gen,
-]
+if have_x11_support
+  gdm_x_session_src = [
+    'gdm-x-session.c',
+    manager_dbus_gen,
+  ]
 
-gdm_x_session = executable('gdm-x-session',
-  gdm_x_session_src,
-  dependencies: gdm_daemon_deps,
-  include_directories: gdm_session_worker_includes,
-  install: true,
-  install_dir: get_option('libexecdir'),
-)
+  gdm_x_session = executable('gdm-x-session',
+    gdm_x_session_src,
+    dependencies: gdm_daemon_deps,
+    include_directories: gdm_session_worker_includes,
+    install: true,
+    install_dir: get_option('libexecdir'),
+  )
+endif
 
 # GDM daemon
 gdm_daemon_sources = files(
@@ -172,6 +191,8 @@ gdm_daemon_sources = files(
   'gdm-legacy-display.c',
   'gdm-local-display-factory.c',
   'gdm-local-display.c',
+  'gdm-remote-display.c',
+  'gdm-remote-display-factory.c',
   'gdm-manager.c',
   'gdm-server.c',
   'gdm-session-record.c',
@@ -186,12 +207,14 @@ gdm_daemon_gen_sources = [
   local_display_factory_dbus_gen,
   manager_dbus_gen,
   local_display_dbus_gen,
+  remote_display_dbus_gen,
+  remote_display_factory_dbus_gen,
   session_dbus_gen,
   session_worker_dbus_gen,
   gdm_session_enums,
 ]
 
-if xdmcp_dep.found()
+if have_xdmcp
   gdm_daemon_deps += xdmcp_dep
 
   gdm_daemon_sources = [
@@ -202,6 +225,10 @@ if xdmcp_dep.found()
       'gdm-xdmcp-chooser-display.c',
     ),
   ]
+endif
+
+if gudev_dep.found()
+  gdm_daemon_deps += gudev_dep
 endif
 
 gdm_daemon = executable('gdm',

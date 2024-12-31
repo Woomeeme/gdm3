@@ -80,12 +80,12 @@ static void
 record_set_timestamp (UTMP *u)
 {
 #if defined(HAVE_UT_UT_TV)
-        GTimeVal    now = { 0 };
+        gint64 now;
 
         /* Set time in TV format */
-        g_get_current_time (&now);
-        u->ut_tv.tv_sec  = now.tv_sec;
-        u->ut_tv.tv_usec = now.tv_usec;
+        now = g_get_real_time();
+        u->ut_tv.tv_sec  = now / G_USEC_PER_SEC;
+        u->ut_tv.tv_usec = now % G_USEC_PER_SEC;
         g_debug ("using ut_tv time %ld",
                  (glong) u->ut_tv.tv_sec);
 #elif defined(HAVE_UT_UT_TIME)
@@ -114,11 +114,9 @@ record_set_host (UTMP       *u,
                  const char *x11_display_name,
                  const char *host_name)
 {
-        char *hostname;
+        g_autofree char *hostname = NULL;
 
 #if defined(HAVE_UT_UT_HOST)
-        hostname = NULL;
-
         /*
          * Set ut_host to hostname:$DISPLAY if remote, otherwise set
          * to $DISPLAY
@@ -137,7 +135,6 @@ record_set_host (UTMP       *u,
 #ifdef HAVE_UT_UT_SYSLEN
                 u->ut_syslen = MIN (strlen (hostname), sizeof (u->ut_host));
 #endif
-                g_free (hostname);
         }
 #endif
 }
@@ -149,13 +146,19 @@ record_set_line (UTMP       *u,
 {
         /*
          * Set ut_line to the device name associated with this display
-         * but remove the "/dev/" prefix.  If no device, then use the
-         * $DISPLAY value.
+         * but remove the "/dev/" prefix if there is one. Otherwise, if it
+         * seems like the display device is a seat id, just use it wholesale.
+         * If there's no device at all, but $DISPLAY is set, just fall back to
+         * using that.
          */
-        if (display_device != NULL
-            && g_str_has_prefix (display_device, "/dev/")) {
+        if (display_device != NULL && g_str_has_prefix (display_device, "/dev/")) {
                 memccpy (u->ut_line,
                          display_device + strlen ("/dev/"),
+                         '\0',
+                         sizeof (u->ut_line));
+        } else if (display_device != NULL && g_str_has_prefix (display_device, "seat")) {
+                memccpy (u->ut_line,
+                         display_device,
                          '\0',
                          sizeof (u->ut_line));
         } else if (x11_display_name != NULL) {

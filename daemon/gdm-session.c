@@ -43,6 +43,10 @@
 #include <glib-object.h>
 #include <gio/gio.h>
 
+#include <json-glib/json-glib.h>
+
+#include <systemd/sd-login.h>
+
 #include "gdm-session.h"
 #include "gdm-session-glue.h"
 #include "gdm-dbus-util.h"
@@ -135,8 +139,11 @@ struct _GdmSession
 
         GStrv                supported_session_types;
 
+        char                *remote_id;
+
         guint32              is_program_session : 1;
         guint32              display_is_initial : 1;
+        guint32              is_opened : 1;
 };
 
 enum {
@@ -154,6 +161,7 @@ enum {
         PROP_USER_X11_AUTHORITY_FILE,
         PROP_CONVERSATION_ENVIRONMENT,
         PROP_SUPPORTED_SESSION_TYPES,
+        PROP_REMOTE_ID,
 };
 
 enum {
@@ -168,6 +176,7 @@ enum {
         CLIENT_READY_FOR_SESSION_TO_START,
         DISCONNECTED,
         AUTHENTICATION_FAILED,
+        CREDENTIALS_ESTABLISHED,
         VERIFICATION_COMPLETE,
         SESSION_OPENED,
         SESSION_OPENED_FAILED,
@@ -177,6 +186,7 @@ enum {
         SESSION_DIED,
         REAUTHENTICATION_STARTED,
         REAUTHENTICATED,
+        STOP_CONFLICTING_SESSION,
         LAST_SIGNAL
 };
 
@@ -321,6 +331,12 @@ on_establish_credentials_cb (GdmDBusWorker *proxy,
         service_name = g_strdup (conversation->service_name);
 
         if (worked) {
+                g_signal_emit (self,
+                               signals[CREDENTIALS_ESTABLISHED],
+                               0,
+                               service_name,
+                               conversation->worker_pid);
+
                 switch (self->verification_mode) {
                 case GDM_SESSION_VERIFICATION_MODE_LOGIN:
                 case GDM_SESSION_VERIFICATION_MODE_CHOOSER:
@@ -459,6 +475,13 @@ load_key_file_for_file (GdmSession   *self,
 }
 
 static gboolean
+is_wayland_headless (GdmSession *self)
+{
+        return g_strcmp0 (self->session_type, "wayland") == 0 &&
+                          !self->display_is_local;
+}
+
+static gboolean
 get_session_command_for_file (GdmSession  *self,
                               const char  *file,
                               const char  *type,
@@ -496,6 +519,19 @@ get_session_command_for_file (GdmSession  *self,
         if (error == NULL && res) {
                 g_debug ("GdmSession: Session %s is marked as hidden", file);
                 goto out;
+        }
+
+        if (is_wayland_headless (self)) {
+                gboolean can_run_headless;
+
+                can_run_headless = g_key_file_get_boolean (key_file,
+                                                           G_KEY_FILE_DESKTOP_GROUP,
+                                                           "X-GDM-CanRunHeadless",
+                                                           NULL);
+                if (!can_run_headless && is_wayland_headless (self)) {
+                        g_debug ("GdmSession: Session %s is not headless capable", file);
+                        goto out;
+                }
         }
 
         exec = g_key_file_get_string (key_file,
@@ -682,6 +718,8 @@ void
 gdm_session_select_user (GdmSession *self,
                          const char *text)
 {
+        g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (text != NULL);
 
         g_debug ("GdmSession: selecting user '%s' for session '%s' (%p)",
                  text,
@@ -752,9 +790,9 @@ gdm_session_handle_choice_list_query (GdmDBusWorkerManager  *worker_manager_inte
                                                              gdm_dbus_user_verifier_choice_list_interface_info ()->name);
 
         if (choice_list_interface == NULL) {
-                g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
-                                                       G_DBUS_ERROR_NOT_SUPPORTED,
-                                                       "ChoiceList interface not supported by client");
+                g_dbus_method_invocation_return_error_literal (invocation, G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_NOT_SUPPORTED,
+                                                               "ChoiceList interface not supported by client");
                 return TRUE;
         }
 
@@ -767,6 +805,49 @@ gdm_session_handle_choice_list_query (GdmDBusWorkerManager  *worker_manager_inte
                                                                       service_name,
                                                                       prompt_message,
                                                                       query);
+        }
+
+        return TRUE;
+}
+
+static gboolean
+gdm_session_handle_custom_json_request (GdmDBusWorkerManager  *worker_manager_interface,
+                                        GDBusMethodInvocation *invocation,
+                                        const char            *service_name,
+                                        const char            *protocol,
+                                        unsigned int           version,
+                                        const char            *request,
+                                        GdmSession            *self)
+{
+        GdmSessionConversation *conversation;
+        GdmDBusUserVerifierCustomJSON *custom_json_interface = NULL;
+
+        g_debug ("GdmSession: custom JSON request for service '%s'", service_name);
+
+        if (self->user_verifier_extensions != NULL) {
+                custom_json_interface =
+                        g_hash_table_lookup (self->user_verifier_extensions,
+                                             gdm_dbus_user_verifier_custom_json_interface_info ()->name);
+        }
+
+        if (custom_json_interface == NULL) {
+                g_dbus_method_invocation_return_error_literal (invocation, G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_NOT_SUPPORTED,
+                                                               "custom JSON interface not supported by client");
+                return TRUE;
+        }
+
+        conversation = find_conversation_by_name (self, service_name);
+        if (conversation != NULL) {
+                set_pending_query (conversation, invocation);
+
+                g_debug ("GdmSession: emitting custom JSON request '%s' v%u",
+                         protocol, version);
+                gdm_dbus_user_verifier_custom_json_emit_request (custom_json_interface,
+                                                                 service_name,
+                                                                 protocol,
+                                                                 version,
+                                                                 request);
         }
 
         return TRUE;
@@ -901,11 +982,14 @@ on_opened (GdmDBusWorker *worker,
 
                 if (self->greeter_interface != NULL) {
                         gdm_dbus_greeter_emit_session_opened (self->greeter_interface,
-                                                              service_name);
+                                                              service_name,
+                                                              session_id);
                 }
 
                 g_debug ("GdmSession: Emitting 'session-opened' signal");
                 g_signal_emit (self, signals[SESSION_OPENED], 0, service_name, session_id);
+
+                self->is_opened = TRUE;
         } else {
                 report_and_stop_conversation (self, service_name, error);
 
@@ -985,11 +1069,12 @@ on_reauthentication_started_cb (GdmDBusWorker *worker,
 static void
 worker_on_reauthenticated (GdmDBusWorker          *worker,
                            const char             *service_name,
+                           int                     reauth_pid,
                            GdmSessionConversation *conversation)
 {
         GdmSession *self = conversation->session;
         g_debug ("GdmSession: Emitting 'reauthenticated' signal ");
-        g_signal_emit (self, signals[REAUTHENTICATED], 0, service_name);
+        g_signal_emit (self, signals[REAUTHENTICATED], 0, service_name, reauth_pid);
 }
 
 static void
@@ -1036,6 +1121,8 @@ worker_on_saved_session_name_read (GdmDBusWorker          *worker,
                 }
                 if (self->saved_session_type != NULL)
                         set_session_type (self, self->saved_session_type);
+                else
+                        update_session_type (self);
         }
 
 }
@@ -1095,6 +1182,7 @@ allow_worker_function (GDBusAuthObserver *observer,
         return FALSE;
 }
 
+
 static void
 on_worker_connection_closed (GDBusConnection *connection,
                              gboolean         remote_peer_vanished,
@@ -1104,6 +1192,9 @@ on_worker_connection_closed (GDBusConnection *connection,
         self->pending_worker_connections =
             g_list_remove (self->pending_worker_connections,
                            connection);
+        g_object_set_data (G_OBJECT (connection),
+                           "gdm-dbus-worker-manager-interface",
+                           NULL);
         g_object_unref (connection);
 }
 
@@ -1135,6 +1226,10 @@ register_worker (GdmDBusWorkerManager  *worker_manager_interface,
                 g_list_delete_link (self->pending_worker_connections,
                                     connection_node);
 
+        g_object_set_data (G_OBJECT (connection),
+                           "gdm-dbus-worker-manager-interface",
+                           NULL);
+
         g_signal_handlers_disconnect_by_func (connection,
                                               G_CALLBACK (on_worker_connection_closed),
                                               self);
@@ -1147,9 +1242,9 @@ register_worker (GdmDBusWorkerManager  *worker_manager_interface,
         if (conversation == NULL) {
                 g_warning ("GdmSession: New worker connection is from unknown source");
 
-                g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
-                                                       G_DBUS_ERROR_ACCESS_DENIED,
-                                                       "Connection is not from a known conversation");
+                g_dbus_method_invocation_return_error_literal (invocation, G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_ACCESS_DENIED,
+                                                               "Connection is not from a known conversation");
                 g_dbus_connection_close_sync (connection, NULL, NULL);
                 return TRUE;
         }
@@ -1226,42 +1321,56 @@ export_worker_manager_interface (GdmSession      *self,
         GdmDBusWorkerManager *worker_manager_interface;
 
         worker_manager_interface = GDM_DBUS_WORKER_MANAGER (gdm_dbus_worker_manager_skeleton_new ());
-        g_signal_connect (worker_manager_interface,
-                          "handle-hello",
-                          G_CALLBACK (register_worker),
-                          self);
-        g_signal_connect (worker_manager_interface,
-                          "handle-info-query",
-                          G_CALLBACK (gdm_session_handle_info_query),
-                          self);
-        g_signal_connect (worker_manager_interface,
-                          "handle-secret-info-query",
-                          G_CALLBACK (gdm_session_handle_secret_info_query),
-                          self);
-        g_signal_connect (worker_manager_interface,
-                          "handle-info",
-                          G_CALLBACK (gdm_session_handle_info),
-                          self);
-        g_signal_connect (worker_manager_interface,
-                          "handle-problem",
-                          G_CALLBACK (gdm_session_handle_problem),
-                          self);
-        g_signal_connect (worker_manager_interface,
-                          "handle-choice-list-query",
-                          G_CALLBACK (gdm_session_handle_choice_list_query),
-                          self);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-hello",
+                                 G_CALLBACK (register_worker),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-info-query",
+                                 G_CALLBACK (gdm_session_handle_info_query),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-secret-info-query",
+                                 G_CALLBACK (gdm_session_handle_secret_info_query),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-info",
+                                 G_CALLBACK (gdm_session_handle_info),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-problem",
+                                 G_CALLBACK (gdm_session_handle_problem),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-choice-list-query",
+                                 G_CALLBACK (gdm_session_handle_choice_list_query),
+                                 self,
+                                 0);
+        g_signal_connect_object (worker_manager_interface,
+                                 "handle-custom-json-request",
+                                 G_CALLBACK (gdm_session_handle_custom_json_request),
+                                 self,
+                                 0);
 
         g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (worker_manager_interface),
                                           connection,
                                           GDM_SESSION_DBUS_OBJECT_PATH,
                                           NULL);
+        g_object_set_data_full (G_OBJECT (connection),
+                                "gdm-dbus-worker-manager-interface",
+                                g_object_ref (worker_manager_interface),
+                                g_object_unref);
 }
 
 static void
 unexport_worker_manager_interface (GdmSession           *self,
                                    GdmDBusWorkerManager *worker_manager_interface)
 {
-
         g_dbus_interface_skeleton_unexport (G_DBUS_INTERFACE_SKELETON (worker_manager_interface));
 
         g_signal_handlers_disconnect_by_func (worker_manager_interface,
@@ -1281,6 +1390,9 @@ unexport_worker_manager_interface (GdmSession           *self,
                                               self);
         g_signal_handlers_disconnect_by_func (worker_manager_interface,
                                               G_CALLBACK (gdm_session_handle_choice_list_query),
+                                              self);
+        g_signal_handlers_disconnect_by_func (worker_manager_interface,
+                                              G_CALLBACK (gdm_session_handle_custom_json_request),
                                               self);
 }
 
@@ -1326,10 +1438,10 @@ begin_verification_conversation (GdmSession            *self,
         }
 
         if (conversation == NULL) {
-                g_dbus_method_invocation_return_error (invocation,
-                                                       G_DBUS_ERROR,
-                                                       G_DBUS_ERROR_SPAWN_FAILED,
-                                                       _("Could not create authentication helper process"));
+                g_dbus_method_invocation_return_error_literal (invocation,
+                                                               G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_SPAWN_FAILED,
+                                                               _("Could not create authentication helper process"));
         }
 
         return conversation;
@@ -1372,6 +1484,81 @@ export_user_verifier_choice_list_interface (GdmSession      *self,
 }
 
 static gboolean
+gdm_session_handle_client_custom_json_reply (GdmDBusUserVerifierCustomJSON *custom_json_interface,
+                                             GDBusMethodInvocation         *invocation,
+                                             const char                    *service_name,
+                                             const char                    *json,
+                                             GdmSession                    *self)
+{
+        g_autoptr(GError) error = NULL;
+        g_autoptr(JsonParser) parser = NULL;
+
+        g_debug ("GdmSession: user replied with custom JSON");
+
+        parser = json_parser_new_immutable ();
+        if (!json_parser_load_from_data (parser, json, -1, &error)) {
+                g_autofree char *message = NULL;
+
+                message = g_strdup_printf ("JSON reply is not valid: %s", error->message);
+                g_warning ("GdmSession: %s", message);
+
+                g_dbus_method_invocation_return_error_literal (invocation,
+                                                               G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_NOT_SUPPORTED,
+                                                               message);
+                gdm_session_report_error (self, service_name,
+                                          G_DBUS_ERROR_NOT_SUPPORTED,
+                                          message);
+                return TRUE;
+        }
+
+        gdm_dbus_user_verifier_custom_json_complete_reply (custom_json_interface, invocation);
+        gdm_session_answer_query (self, service_name, json);
+        return TRUE;
+}
+
+static gboolean
+gdm_session_handle_client_custom_json_report_error (GdmDBusUserVerifierCustomJSON *custom_json_interface,
+                                                    GDBusMethodInvocation         *invocation,
+                                                    const char                    *service_name,
+                                                    const char                    *message,
+                                                    GdmSession                    *self)
+{
+        g_debug ("GdmSession: user reported custom JSON error: %s", message);
+
+        gdm_dbus_user_verifier_custom_json_complete_report_error (custom_json_interface, invocation);
+        gdm_session_report_error (self, service_name, G_DBUS_ERROR_ACCESS_DENIED, message);
+        return TRUE;
+}
+
+static void
+export_user_verifier_custom_json_interface (GdmSession      *self,
+                                             GDBusConnection *connection)
+{
+        GdmDBusUserVerifierCustomJSON *interface;
+
+        interface = GDM_DBUS_USER_VERIFIER_CUSTOM_JSON (gdm_dbus_user_verifier_custom_json_skeleton_new ());
+
+        g_signal_connect (interface,
+                          "handle-reply",
+                          G_CALLBACK (gdm_session_handle_client_custom_json_reply),
+                          self);
+        g_signal_connect (interface,
+                          "handle-report-error",
+                          G_CALLBACK (gdm_session_handle_client_custom_json_report_error),
+                          self);
+
+        g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (interface),
+                                          connection,
+                                          GDM_SESSION_DBUS_OBJECT_PATH,
+                                          NULL);
+
+        g_hash_table_insert (self->user_verifier_extensions,
+                             gdm_dbus_user_verifier_custom_json_interface_info ()->name,
+                             interface);
+}
+
+static gboolean
 gdm_session_handle_client_enable_extensions (GdmDBusUserVerifier    *user_verifier_interface,
                                              GDBusMethodInvocation  *invocation,
                                              const char * const *    extensions,
@@ -1389,6 +1576,10 @@ gdm_session_handle_client_enable_extensions (GdmDBusUserVerifier    *user_verifi
                 if (strcmp (extensions[i],
                             gdm_dbus_user_verifier_choice_list_interface_info ()->name) == 0)
                         export_user_verifier_choice_list_interface (self, connection);
+
+                if (g_str_equal (extensions[i],
+                                 gdm_dbus_user_verifier_custom_json_interface_info ()->name))
+                        export_user_verifier_custom_json_interface (self, connection);
 
         }
 
@@ -1587,6 +1778,28 @@ gdm_session_handle_get_timed_login_details (GdmDBusGreeter        *greeter_inter
 }
 
 static gboolean
+gdm_session_handle_client_stop_conflicting_session (GdmDBusGreeter        *greeter_interface,
+                                                    GDBusMethodInvocation *invocation,
+                                                    GdmSession            *self)
+{
+        if (!self->is_opened) {
+                g_dbus_method_invocation_return_error_literal (invocation, G_DBUS_ERROR,
+                                                               G_DBUS_ERROR_ACCESS_DENIED,
+                                                               "Can't stop conflicting session if this session is not opened yet");
+                return TRUE;
+        }
+
+        g_signal_emit (self, signals[STOP_CONFLICTING_SESSION], 0, self->selected_user);
+
+        if (self->greeter_interface != NULL) {
+                gdm_dbus_greeter_complete_stop_conflicting_session (self->greeter_interface,
+                                                                    invocation);
+        }
+
+        return TRUE;
+}
+
+static gboolean
 gdm_session_handle_client_begin_auto_login (GdmDBusGreeter        *greeter_interface,
                                             GDBusMethodInvocation *invocation,
                                             const char            *username,
@@ -1688,6 +1901,10 @@ export_greeter_interface (GdmSession      *self,
         g_signal_connect (greeter_interface,
                           "handle-get-timed-login-details",
                           G_CALLBACK (gdm_session_handle_get_timed_login_details),
+                          self);
+        g_signal_connect (greeter_interface,
+                          "handle-stop-conflicting-session",
+                          G_CALLBACK (gdm_session_handle_client_stop_conflicting_session),
                           self);
 
         g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (greeter_interface),
@@ -2249,8 +2466,10 @@ close_conversation (GdmSessionConversation *conversation)
 
         if (conversation->worker_proxy != NULL) {
                 GDBusConnection *connection = g_dbus_proxy_get_connection (G_DBUS_PROXY (conversation->worker_proxy));
+
                 g_dbus_connection_close_sync (connection, NULL, NULL);
         }
+
 }
 
 static void
@@ -2291,6 +2510,7 @@ gdm_session_start_conversation (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_val_if_fail (GDM_IS_SESSION (self), FALSE);
+        g_return_val_if_fail (service_name != NULL, FALSE);
 
         conversation = g_hash_table_lookup (self->conversations,
                                             service_name);
@@ -2322,6 +2542,7 @@ gdm_session_stop_conversation (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         g_debug ("GdmSession: stopping conversation %s", service_name);
 
@@ -2446,6 +2667,7 @@ gdm_session_setup (GdmSession *self,
 {
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         update_session_type (self);
 
@@ -2461,6 +2683,7 @@ gdm_session_setup_for_user (GdmSession *self,
 {
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
         g_return_if_fail (username != NULL);
 
         update_session_type (self);
@@ -2484,6 +2707,7 @@ gdm_session_setup_for_program (GdmSession *self,
 {
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         self->is_program_session = TRUE;
         initialize (self, service_name, username, log_file);
@@ -2496,6 +2720,7 @@ gdm_session_authenticate (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
         if (conversation != NULL) {
@@ -2513,6 +2738,7 @@ gdm_session_authorize (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
         if (conversation != NULL) {
@@ -2530,6 +2756,7 @@ gdm_session_accredit (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
         if (conversation != NULL) {
@@ -2569,6 +2796,7 @@ gdm_session_send_environment (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
         if (conversation != NULL) {
@@ -2643,6 +2871,7 @@ gdm_session_set_environment_variable (GdmSession *self,
                                       const char *key,
                                       const char *value)
 {
+        g_return_if_fail (GDM_IS_SESSION (self));
         g_return_if_fail (key != NULL);
         g_return_if_fail (value != NULL);
 
@@ -2773,6 +3002,7 @@ gdm_session_open_session (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
 
@@ -2894,6 +3124,7 @@ gdm_session_start_session (GdmSession *self,
         gboolean               register_session;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
         g_return_if_fail (self->session_conversation == NULL);
 
         conversation = find_conversation_by_name (self, service_name);
@@ -3002,12 +3233,43 @@ stop_all_conversations (GdmSession *self)
 }
 
 static void
+free_pending_worker_connection (GdmSession      *self,
+                                GDBusConnection *connection)
+{
+        GdmDBusWorkerManager *worker_manager_interface;
+
+        worker_manager_interface = g_object_get_data (G_OBJECT (connection),
+                                                      "gdm-dbus-worker-manager-interface");
+        if (worker_manager_interface != NULL) {
+                g_dbus_interface_skeleton_unexport (G_DBUS_INTERFACE_SKELETON (worker_manager_interface));
+                g_object_set_data (G_OBJECT (connection),
+                                   "gdm-dbus-worker-manager-interface",
+                                   NULL);
+        }
+
+        g_object_unref (connection);
+}
+
+static void
+free_pending_worker_connections (GdmSession *self)
+{
+        GList *node;
+
+        for (node = self->pending_worker_connections; node != NULL; node = node->next) {
+                GDBusConnection *connection = node->data;
+
+                free_pending_worker_connection (self, connection);
+        }
+        g_list_free (self->pending_worker_connections);
+        self->pending_worker_connections = NULL;
+}
+
+static void
 do_reset (GdmSession *self)
 {
         stop_all_conversations (self);
 
-        g_list_free_full (self->pending_worker_connections, g_object_unref);
-        self->pending_worker_connections = NULL;
+        free_pending_worker_connections (self);
 
         g_free (self->selected_user);
         self->selected_user = NULL;
@@ -3051,12 +3313,33 @@ gdm_session_answer_query (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
+        g_return_if_fail (text != NULL);
 
         conversation = find_conversation_by_name (self, service_name);
 
         if (conversation != NULL) {
                 answer_pending_query (conversation, text);
         }
+}
+
+void
+gdm_session_report_error (GdmSession *self,
+                          const char *service_name,
+                          GDBusError  code,
+                          const char *message)
+{
+        GdmSessionConversation *conversation;
+
+        g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (service_name != NULL);
+
+        conversation = find_conversation_by_name (self, service_name);
+        if (conversation == NULL)
+                return;
+
+        g_dbus_method_invocation_return_error_literal (g_steal_pointer (&conversation->pending_invocation),
+                                                       G_DBUS_ERROR, code, message);
 }
 
 void
@@ -3070,6 +3353,8 @@ gdm_session_cancel  (GdmSession *self)
 void
 gdm_session_reset (GdmSession *self)
 {
+        g_return_if_fail (GDM_IS_SESSION (self));
+
         if (self->user_verifier_interface != NULL) {
                 gdm_dbus_user_verifier_emit_reset (self->user_verifier_interface);
         }
@@ -3082,6 +3367,9 @@ gdm_session_set_timed_login_details (GdmSession *self,
                                      const char *username,
                                      int         delay)
 {
+        g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (username != NULL);
+
         g_debug ("GdmSession: timed login details %s %d", username, delay);
         self->timed_login_username = g_strdup (username);
         self->timed_login_delay = delay;
@@ -3090,7 +3378,37 @@ gdm_session_set_timed_login_details (GdmSession *self,
 gboolean
 gdm_session_is_running (GdmSession *self)
 {
+        g_return_val_if_fail (GDM_IS_SESSION (self), FALSE);
+
         return self->session_pid > 0;
+}
+
+gboolean
+gdm_session_is_frozen (GdmSession *self)
+{
+        g_autofree char *cgroup = NULL, *path = NULL, *data = NULL;
+        g_auto (GStrv) arr = NULL;
+
+        g_return_val_if_fail (GDM_IS_SESSION (self), FALSE);
+
+        if (self->session_pid <= 0)
+                return FALSE;
+
+        if (sd_pid_get_cgroup (self->session_pid, &cgroup) < 0)
+                return FALSE;
+
+        path = g_build_filename ("/sys/fs/cgroup", cgroup, "cgroup.events", NULL);
+
+        if (!g_file_get_contents (path, &data, NULL, NULL))
+                return FALSE;
+
+        arr = g_strsplit_set (data, " \n", -1);
+
+        for (gsize i = 0; arr[i] != NULL; i++) {
+                if (g_str_equal (arr[i], "frozen"))
+                        return g_str_equal (arr[i + 1], "1");
+        }
+        return FALSE;
 }
 
 gboolean
@@ -3108,13 +3426,16 @@ gdm_session_get_allowed_user (GdmSession *self)
 }
 
 void
-gdm_session_start_reauthentication (GdmSession *session,
+gdm_session_start_reauthentication (GdmSession *self,
                                     GPid        pid_of_caller,
                                     uid_t       uid_of_caller)
 {
-        GdmSessionConversation *conversation = session->session_conversation;
+        GdmSessionConversation *conversation;
 
-        g_return_if_fail (conversation != NULL);
+        g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (self->session_conversation != NULL);
+
+        conversation = self->session_conversation;
 
         g_debug ("GdmSession: starting reauthentication for session %s for client with pid %d",
                  conversation->session_id,
@@ -3159,7 +3480,7 @@ gdm_session_get_display_seat_id (GdmSession *self)
 {
         g_return_val_if_fail (GDM_IS_SESSION (self), NULL);
 
-        return g_strdup (self->display_seat_id);
+        return self->display_seat_id;
 }
 
 const char *
@@ -3185,6 +3506,7 @@ gdm_session_get_conversation_session_id (GdmSession *self,
         GdmSessionConversation *conversation;
 
         g_return_val_if_fail (GDM_IS_SESSION (self), NULL);
+        g_return_val_if_fail (service_name != NULL, NULL);
 
         conversation = find_conversation_by_name (self, service_name);
 
@@ -3258,7 +3580,6 @@ gdm_session_session_registers (GdmSession *self)
         gboolean session_registers = FALSE;
         g_autofree char *filename = NULL;
 
-        g_return_val_if_fail (self != NULL, FALSE);
         g_return_val_if_fail (GDM_IS_SESSION (self), FALSE);
 
         filename = get_session_filename (self);
@@ -3291,7 +3612,6 @@ gdm_session_bypasses_xsession (GdmSession *self)
         gboolean    bypasses_xsession = FALSE;
         char       *filename = NULL;
 
-        g_return_val_if_fail (self != NULL, FALSE);
         g_return_val_if_fail (GDM_IS_SESSION (self), FALSE);
 
 #ifdef ENABLE_WAYLAND_SUPPORT
@@ -3329,16 +3649,20 @@ out:
 GdmSessionDisplayMode
 gdm_session_get_display_mode (GdmSession *self)
 {
+        g_return_val_if_fail (GDM_IS_SESSION (self), GDM_SESSION_DISPLAY_MODE_NEW_VT);
+
         g_debug ("GdmSession: type %s, program? %s, seat %s",
                  self->session_type,
                  self->is_program_session? "yes" : "no",
                  self->display_seat_id);
 
-        /* Non-seat0 sessions share their X server with their login screen
-         * for now.
-         */
-        if (g_strcmp0 (self->display_seat_id, "seat0") != 0) {
+        if (self->display_seat_id == NULL &&
+            g_strcmp0 (self->session_type, "wayland") != 0) {
                 return GDM_SESSION_DISPLAY_MODE_REUSE_VT;
+        }
+
+        if (g_strcmp0 (self->display_seat_id, "seat0") != 0) {
+                return GDM_SESSION_DISPLAY_MODE_LOGIND_MANAGED;
         }
 
 #ifdef ENABLE_USER_DISPLAY_SERVER
@@ -3382,6 +3706,7 @@ void
 gdm_session_select_program (GdmSession *self,
                             const char *text)
 {
+        g_return_if_fail (GDM_IS_SESSION (self));
 
         g_free (self->selected_program);
 
@@ -3394,6 +3719,9 @@ gdm_session_select_session (GdmSession *self,
 {
         GHashTableIter iter;
         gpointer key, value;
+
+        g_return_if_fail (GDM_IS_SESSION (self));
+        g_return_if_fail (text != NULL);
 
         g_debug ("GdmSession: selecting session '%s'", text);
 
@@ -3513,6 +3841,14 @@ set_session_type (GdmSession *self,
 }
 
 static void
+set_remote_id (GdmSession *self,
+               const char *remote_id)
+{
+        g_free (self->remote_id);
+        self->remote_id = g_strdup (remote_id);
+}
+
+static void
 gdm_session_set_property (GObject      *object,
                           guint         prop_id,
                           const GValue *value,
@@ -3561,6 +3897,9 @@ gdm_session_set_property (GObject      *object,
                 break;
         case PROP_SUPPORTED_SESSION_TYPES:
                 gdm_session_set_supported_session_types (self, g_value_get_boxed (value));
+                break;
+        case PROP_REMOTE_ID:
+                set_remote_id (self, g_value_get_string (value));
                 break;
         default:
                 G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -3617,6 +3956,9 @@ gdm_session_get_property (GObject    *object,
                 break;
         case PROP_SUPPORTED_SESSION_TYPES:
                 g_value_set_boxed (value, self->supported_session_types);
+                break;
+        case PROP_REMOTE_ID:
+                g_value_set_string (value, self->remote_id);
                 break;
         default:
                 G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -3774,6 +4116,17 @@ gdm_session_class_init (GdmSessionClass *session_class)
                               2,
                               G_TYPE_STRING,
                               G_TYPE_INT);
+        signals [CREDENTIALS_ESTABLISHED] =
+                g_signal_new ("credentials-established",
+                              GDM_TYPE_SESSION,
+                              G_SIGNAL_RUN_FIRST,
+                              0,
+                              NULL,
+                              NULL,
+                              NULL,
+                              G_TYPE_NONE,
+                              1,
+                              G_TYPE_STRING);
         signals [VERIFICATION_COMPLETE] =
                 g_signal_new ("verification-complete",
                               GDM_TYPE_SESSION,
@@ -3875,8 +4228,9 @@ gdm_session_class_init (GdmSessionClass *session_class)
                               NULL,
                               NULL,
                               G_TYPE_NONE,
-                              1,
-                              G_TYPE_STRING);
+                              2,
+                              G_TYPE_STRING,
+                              G_TYPE_INT);
         signals [CANCELLED] =
                 g_signal_new ("cancelled",
                               GDM_TYPE_SESSION,
@@ -3960,6 +4314,17 @@ gdm_session_class_init (GdmSessionClass *session_class)
                               g_cclosure_marshal_VOID__VOID,
                               G_TYPE_NONE,
                               0);
+        signals [STOP_CONFLICTING_SESSION] =
+                g_signal_new ("stop-conflicting-session",
+                              GDM_TYPE_SESSION,
+                              G_SIGNAL_RUN_FIRST,
+                              0,
+                              NULL,
+                              NULL,
+                              NULL,
+                              G_TYPE_NONE,
+                              1,
+                              G_TYPE_STRING);
 
         g_object_class_install_property (object_class,
                                          PROP_VERIFICATION_MODE,
@@ -4059,6 +4424,14 @@ gdm_session_class_init (GdmSessionClass *session_class)
                                                              G_TYPE_STRV,
                                                              G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 
+        g_object_class_install_property (object_class,
+                                         PROP_REMOTE_ID,
+                                         g_param_spec_string ("remote-id",
+                                                              "remote id",
+                                                              "remote id",
+                                                              NULL,
+                                                              G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+
         /* Ensure we can resolve errors */
         gdm_dbus_error_ensure (GDM_SESSION_WORKER_ERROR);
 }
@@ -4124,7 +4497,9 @@ gdm_session_display_mode_to_string (GdmSessionDisplayMode mode)
 }
 
 GPid
-gdm_session_get_pid (GdmSession *session)
+gdm_session_get_pid (GdmSession *self)
 {
-        return session->session_pid;
+        g_return_val_if_fail (GDM_IS_SESSION (self), 0);
+
+        return self->session_pid;
 }

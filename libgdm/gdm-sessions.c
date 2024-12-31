@@ -35,6 +35,8 @@
 #include <glib/gi18n.h>
 #include <glib/gstdio.h>
 
+#include <systemd/sd-login.h>
+
 #include "gdm-sessions.h"
 
 typedef struct _GdmSessionFile {
@@ -58,14 +60,62 @@ gdm_session_file_free (GdmSessionFile *session)
   g_free (session);
 }
 
+static char *
+get_systemd_session (void)
+{
+        int ret;
+        g_autofree char *systemd_unit = NULL;
+        g_autofree char *session_id = NULL;
+        pid_t pid;
+        uid_t uid;
+
+        pid = getpid ();
+        uid = getuid ();
+
+        ret = sd_pid_get_user_unit (pid, &systemd_unit);
+
+        if (ret == 0)
+                ret = sd_uid_get_display (uid, &session_id);
+        else
+                ret = sd_pid_get_session (pid, &session_id);
+
+        if (ret < 0)
+                return NULL;
+
+        return g_steal_pointer (&session_id);
+}
+
+static char *
+get_systemd_seat (void)
+{
+        g_autofree char *session_id = NULL;
+        g_autofree char *seat = NULL;
+        int ret;
+
+        session_id = get_systemd_session ();
+
+        if (session_id == NULL)
+                return NULL;
+
+        ret = sd_session_get_seat (session_id, &seat);
+
+        if (ret != 0)
+                return NULL;
+
+        return g_steal_pointer (&seat);
+}
+
 /* adapted from gnome-menus desktop-entries.c */
 static gboolean
 key_file_is_relevant (GKeyFile     *key_file)
 {
         GError    *error;
+        g_autofree char *seat = NULL;
         gboolean   no_display;
         gboolean   hidden;
         gboolean   tryexec_failed;
+        gboolean   can_run_headless;
+        gboolean   only_headless_allowed;
         char      *tryexec;
 
         error = NULL;
@@ -88,6 +138,15 @@ key_file_is_relevant (GKeyFile     *key_file)
                 g_error_free (error);
         }
 
+        seat = get_systemd_seat ();
+
+        only_headless_allowed = seat == NULL;
+
+        can_run_headless = g_key_file_get_boolean (key_file,
+                                                   G_KEY_FILE_DESKTOP_GROUP,
+                                                   "X-GDM-CanRunHeadless",
+                                                   NULL);
+
         tryexec_failed = FALSE;
         tryexec = g_key_file_get_string (key_file,
                                          G_KEY_FILE_DESKTOP_GROUP,
@@ -104,7 +163,7 @@ key_file_is_relevant (GKeyFile     *key_file)
                 g_free (tryexec);
         }
 
-        if (no_display || hidden || tryexec_failed) {
+        if (no_display || hidden || tryexec_failed || (only_headless_allowed && !can_run_headless)) {
                 return FALSE;
         }
 
@@ -142,7 +201,8 @@ load_session_file (const char              *id,
         }
 
         if (!key_file_is_relevant (key_file)) {
-                g_debug ("\"%s\" is hidden or contains non-executable TryExec program\n", path);
+                g_debug ("\"%s\" is hidden, contains non-executable TryExec program, or is otherwise not capable of being used\n", path);
+                g_hash_table_remove (gdm_available_sessions_map, id);
                 goto out;
         }
 
@@ -271,20 +331,25 @@ collect_sessions (void)
         g_autoptr(GPtrArray) wayland_search_array = NULL;
         gchar      *session_dir = NULL;
         int         i;
+        const gchar *supported_session_types_env = NULL;
+        g_auto (GStrv) supported_session_types = NULL;
+        const gchar * const *system_data_dirs = g_get_system_data_dirs ();
+
+        supported_session_types_env = g_getenv ("GDM_SUPPORTED_SESSION_TYPES");
+        if (supported_session_types_env != NULL) {
+                supported_session_types = g_strsplit (supported_session_types_env, ":", -1);
+        }
+
+        names_seen_before = g_hash_table_new (g_str_hash, g_str_equal);
+
+#ifdef ENABLE_X11_SUPPORT
         const char *xorg_search_dirs[] = {
                 "/etc/X11/sessions/",
                 DMCONFDIR "/Sessions/",
                 DATADIR "/gdm/BuiltInSessions/",
                 DATADIR "/xsessions/",
         };
-        g_auto (GStrv) supported_session_types = NULL;
-
-        supported_session_types = g_strsplit (g_getenv ("GDM_SUPPORTED_SESSION_TYPES"), ":", -1);
-
-        names_seen_before = g_hash_table_new (g_str_hash, g_str_equal);
         xorg_search_array = g_ptr_array_new_with_free_func (g_free);
-
-        const gchar * const *system_data_dirs = g_get_system_data_dirs ();
 
         for (i = 0; system_data_dirs[i]; i++) {
                 session_dir = g_build_filename (system_data_dirs[i], "xsessions", NULL);
@@ -294,6 +359,7 @@ collect_sessions (void)
         for (i = 0; i < G_N_ELEMENTS (xorg_search_dirs); i++) {
                 g_ptr_array_add (xorg_search_array, g_strdup (xorg_search_dirs[i]));
         }
+#endif
 
 #ifdef ENABLE_WAYLAND_SUPPORT
         const char *wayland_search_dirs[] = {
@@ -317,16 +383,18 @@ collect_sessions (void)
                                                                     g_free, (GDestroyNotify)gdm_session_file_free);
         }
 
+#ifdef ENABLE_X11_SUPPORT
         if (!supported_session_types || g_strv_contains ((const char * const *) supported_session_types, "x11")) {
-                for (i = 0; i < xorg_search_array->len; i++) {
+                for (i = xorg_search_array->len - 1; i >= 0; i--) {
                         collect_sessions_from_directory (g_ptr_array_index (xorg_search_array, i));
                 }
         }
+#endif
 
 #ifdef ENABLE_WAYLAND_SUPPORT
 #ifdef ENABLE_USER_DISPLAY_SERVER
         if (!supported_session_types  || g_strv_contains ((const char * const *) supported_session_types, "wayland")) {
-                for (i = 0; i < wayland_search_array->len; i++) {
+                for (i = wayland_search_array->len - 1; i >= 0; i--) {
                         collect_sessions_from_directory (g_ptr_array_index (wayland_search_array, i));
                 }
         }

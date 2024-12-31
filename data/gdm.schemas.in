@@ -68,6 +68,11 @@
       <default>true</default>
     </schema>
     <schema>
+      <key>daemon/RemoteLoginEnable</key>
+      <signature>b</signature>
+      <default>true</default>
+    </schema>
+    <schema>
       <key>security/AllowRemoteAutoLogin</key>
       <signature>b</signature>
       <default>false</default>
@@ -128,11 +133,6 @@
       <key>xdmcp/MaxWaitIndirect</key>
       <signature>i</signature>
       <default>30</default>
-    </schema>
-    <schema>
-      <key>xdmcp/PingIntervalSeconds</key>
-      <signature>i</signature>
-      <default>0</default>
     </schema>
     <schema>
       <key>xdmcp/Willing</key>

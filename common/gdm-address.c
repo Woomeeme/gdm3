@@ -39,6 +39,9 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 
+#include <sys/types.h>
+#include <ifaddrs.h>
+
 #ifndef G_OS_WIN32
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -134,7 +137,7 @@ gdm_address_get_sockaddr_storage (GdmAddress *address)
         g_return_val_if_fail (address != NULL, NULL);
         g_return_val_if_fail (address->ss != NULL, NULL);
 
-        ss = g_memdup (address->ss, sizeof (struct sockaddr_storage));
+        ss = g_memdup2 (address->ss, sizeof (struct sockaddr_storage));
 
         return ss;
 }
@@ -236,17 +239,15 @@ _gdm_address_debug (GdmAddress *address,
 void
 gdm_address_debug (GdmAddress *address)
 {
-        char *hostname = NULL;
-        char *host = NULL;
-        char *port = NULL;
+        g_autofree char *hostname = NULL;
+        g_autofree char *host = NULL;
+        g_autofree char *port = NULL;
+
+        g_return_if_fail (address != NULL);
 
         gdm_address_get_numeric_info (address, &host, &port);
 
         _gdm_address_debug (address, host, port);
-
-        g_free (hostname);
-        g_free (host);
-        g_free (port);
 }
 
 gboolean
@@ -423,47 +424,36 @@ add_local_siocgifconf (GList **list)
 static void
 add_local_addrinfo (GList **list)
 {
-        char             hostbuf[BUFSIZ];
-        struct addrinfo *result;
-        struct addrinfo *res;
-        struct addrinfo  hints;
+        struct ifaddrs *interface_addresses;
+	struct ifaddrs *interface_address;
 
-        hostbuf[BUFSIZ-1] = '\0';
-        if (gethostname (hostbuf, BUFSIZ-1) != 0) {
-                g_debug ("%s: Could not get server hostname, using localhost", "gdm_peek_local_address_list");
-                snprintf (hostbuf, BUFSIZ-1, "localhost");
-        }
-
-        memset (&hints, 0, sizeof (hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_flags = AI_CANONNAME | AI_NUMERICHOST;
-
-
-        g_debug ("GdmAddress: looking up hostname: %s", hostbuf);
-        result = NULL;
-        if (getaddrinfo (hostbuf, NULL, &hints, &result) != 0) {
-                g_debug ("%s: Could not get address from hostname!", "gdm_peek_local_address_list");
-
+        if (getifaddrs (&interface_addresses) < 0) {
+                g_debug ("Could not get local interface addresses: %m");
                 return;
         }
 
-        for (res = result; res != NULL; res = res->ai_next) {
+        for (interface_address = interface_addresses; interface_address != NULL; interface_address = interface_address->ifa_next) {
                 GdmAddress *address;
+                int family;
 
-                g_debug ("family=%d sock_type=%d protocol=%d flags=0x%x canonname=%s\n",
-                         res->ai_family,
-                         res->ai_socktype,
-                         res->ai_protocol,
-                         res->ai_flags,
-                         res->ai_canonname ? res->ai_canonname : "(null)");
-                address = gdm_address_new_from_sockaddr (res->ai_addr, res->ai_addrlen);
+                if (interface_address->ifa_addr == NULL)
+                        continue;
+
+                family = interface_address->ifa_addr->sa_family;
+
+                if (family != AF_INET && family != AF_INET6)
+                        continue;
+
+                g_debug ("Local interface %s found (family: %s)\n",
+                         interface_address->ifa_name,
+                         family == AF_INET ? "AF_INET" : "AF_INET6");
+
+                address = gdm_address_new_from_sockaddr (interface_address->ifa_addr,
+                                                         (family == AF_INET) ? sizeof (struct sockaddr_in) : sizeof (struct sockaddr_in6));
                 *list = g_list_append (*list, address);
         }
 
-        if (result != NULL) {
-                freeaddrinfo (result);
-                result = NULL;
-        }
+        freeifaddrs (interface_addresses);
 }
 
 const GList *
@@ -493,6 +483,8 @@ gboolean
 gdm_address_is_local (GdmAddress *address)
 {
         const GList *list;
+
+        g_return_val_if_fail (address != NULL, FALSE);
 
         if (gdm_address_is_loopback (address)) {
                 return TRUE;
@@ -529,7 +521,7 @@ gdm_address_copy (GdmAddress *address)
         g_return_val_if_fail (address != NULL, NULL);
 
         addr = g_new0 (GdmAddress, 1);
-        addr->ss = g_memdup (address->ss, sizeof (struct sockaddr_storage));
+        addr->ss = g_memdup2 (address->ss, sizeof (struct sockaddr_storage));
 
         return addr;
 }
